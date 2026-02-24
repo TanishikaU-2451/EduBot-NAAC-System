@@ -13,7 +13,14 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 import os
+import io
 from contextlib import asynccontextmanager
+
+try:
+    from pdfminer.high_level import extract_text as pdf_extract_text
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
 
 # Import our system components
 from ..rag.pipeline import RAGPipeline
@@ -153,28 +160,56 @@ def _ingest_markdown_docs(chroma_store: ChromaVectorStore, data_dir: Path) -> No
                     chroma_store.add_naac_documents(chunks, metadatas)
                     logger.info(f"Ingested NAAC file: {f.name} ({len(chunks)} chunks)")
 
-        # Ingest MVSR documents
-        mvsr_dir = data_dir / "mvsr_documents"
-        if mvsr_dir.exists():
-            for f in mvsr_dir.glob("*"):
-                if f.suffix.lower() in {".md", ".txt"}:
-                    text = f.read_text(encoding="utf-8", errors="ignore")
+        # Ingest MVSR SSR PDF from mvsr_evidence/reports/
+        ssr_dir = data_dir / "mvsr_evidence" / "reports"
+        ssr_ingested = False
+        if ssr_dir.exists() and PDF_SUPPORT:
+            for f in ssr_dir.glob("*.pdf"):
+                try:
+                    text = pdf_extract_text(str(f))
+                    if not text or not text.strip():
+                        logger.warning(f"No text extracted from SSR PDF: {f.name}")
+                        continue
                     chunks = chunk_text(text)
                     if not chunks:
                         continue
-                    category = "general"
-                    if "research" in f.name.lower():
-                        category = "research"
-                    elif "academic" in f.name.lower():
-                        category = "academic"
                     metadatas = [{
                         "type": "evidence", "criterion": "1",
-                        "document": f.stem.replace("_", " "),
-                        "year": 2024, "category": category,
+                        "document": f.stem.replace("-", " ").replace("_", " "),
+                        "year": 2019, "category": "ssr",
                         "source_file": f.name
                     } for _ in chunks]
                     chroma_store.add_mvsr_documents(chunks, metadatas)
-                    logger.info(f"Ingested MVSR file: {f.name} ({len(chunks)} chunks)")
+                    logger.info(f"Ingested MVSR SSR PDF: {f.name} ({len(chunks)} chunks)")
+                    ssr_ingested = True
+                except Exception as pdf_err:
+                    logger.error(f"Failed to extract PDF {f.name}: {pdf_err}")
+        elif not PDF_SUPPORT:
+            logger.warning("pdfminer not available; falling back to MVSR markdown files")
+
+        # Fallback to MVSR markdown files only if SSR PDF was not ingested
+        if not ssr_ingested:
+            mvsr_dir = data_dir / "mvsr_documents"
+            if mvsr_dir.exists():
+                for f in mvsr_dir.glob("*"):
+                    if f.suffix.lower() in {".md", ".txt"}:
+                        text = f.read_text(encoding="utf-8", errors="ignore")
+                        chunks = chunk_text(text)
+                        if not chunks:
+                            continue
+                        category = "general"
+                        if "research" in f.name.lower():
+                            category = "research"
+                        elif "academic" in f.name.lower():
+                            category = "academic"
+                        metadatas = [{
+                            "type": "evidence", "criterion": "1",
+                            "document": f.stem.replace("_", " "),
+                            "year": 2024, "category": category,
+                            "source_file": f.name
+                        } for _ in chunks]
+                        chroma_store.add_mvsr_documents(chunks, metadatas)
+                        logger.info(f"Ingested MVSR fallback file: {f.name} ({len(chunks)} chunks)")
 
         logger.info("Startup document ingestion complete.")
     except Exception as e:
