@@ -18,7 +18,7 @@ class ApiService {
   constructor() {
     this.api = axios.create({
       baseURL: process.env.REACT_APP_API_BASE_URL || '/api',
-      timeout: 60000, // 60 seconds timeout for long operations
+      timeout: 180000, // 3 minutes timeout for LLM responses on CPU
       headers: {
         'Content-Type': 'application/json',
       },

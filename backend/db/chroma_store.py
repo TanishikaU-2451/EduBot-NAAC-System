@@ -151,9 +151,9 @@ class ChromaVectorStore:
         Returns:
             Dict containing documents, metadatas, distances
         """
-        where_clause = {"type": "requirement"}
+        where_clause = None
         if criterion_filter:
-            where_clause["criterion"] = criterion_filter
+            where_clause = {"criterion": {"$eq": criterion_filter}}
             
         try:
             results = self.naac_collection.query(
@@ -187,9 +187,9 @@ class ChromaVectorStore:
         Returns:
             Dict containing documents, metadatas, distances
         """
-        where_clause = {"type": "evidence"}
+        where_clause = None
         if category_filter:
-            where_clause["category"] = category_filter
+            where_clause = {"category": {"$eq": category_filter}}
             
         try:
             results = self.mvsr_collection.query(

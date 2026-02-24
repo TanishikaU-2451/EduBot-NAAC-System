@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     
     # Retrieval parameters
     max_retrieval_results: int = Field(10, env="MAX_RETRIEVAL_RESULTS")
-    similarity_threshold: float = Field(0.7, env="SIMILARITY_THRESHOLD")
+    similarity_threshold: float = Field(0.3, env="SIMILARITY_THRESHOLD")
     
     # CORS settings
     cors_origins: List[str] = Field(["*"], env="CORS_ORIGINS")

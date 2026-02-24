@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react'
+import React, { createContext, useContext, useState, useCallback, useRef, ReactNode } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { ChatMessage, QueryContextType, ComplianceResponse } from '../types'
 import apiService, { getErrorMessage } from '../services/api'
@@ -19,6 +19,8 @@ export const QueryProvider: React.FC<QueryProviderProps> = ({ children }) => {
     },
   ])
   const [isLoading, setIsLoading] = useState(false)
+  const timerRef = useRef<NodeJS.Timeout | null>(null)
+  const loadingMsgIdRef = useRef<string | null>(null)
 
   const sendQuery = useCallback(async (query: string, filters?: Record<string, any>) => {
     if (!query.trim()) return
@@ -35,14 +37,29 @@ export const QueryProvider: React.FC<QueryProviderProps> = ({ children }) => {
     setIsLoading(true)
 
     // Add loading message
+    const loadingId = uuidv4()
+    loadingMsgIdRef.current = loadingId
     const loadingMessage: ChatMessage = {
-      id: uuidv4(),
+      id: loadingId,
       type: 'assistant',
-      content: 'Analyzing your query and searching knowledge base...',
+      content: '⏳ Analyzing your query... (this may take up to 60 seconds)',
       timestamp: new Date(),
       isLoading: true,
     }
     setMessages((prev) => [...prev, loadingMessage])
+
+    // Update elapsed time every 5 seconds
+    let elapsed = 0
+    timerRef.current = setInterval(() => {
+      elapsed += 5
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === loadingId
+            ? { ...msg, content: `⏳ Still thinking... (${elapsed}s elapsed)` }
+            : msg
+        )
+      )
+    }, 5000)
 
     try {
       const response: ComplianceResponse = await apiService.queryCompliance({
@@ -50,6 +67,8 @@ export const QueryProvider: React.FC<QueryProviderProps> = ({ children }) => {
         filters,
         include_sources: true,
       })
+
+      if (timerRef.current) clearInterval(timerRef.current)
 
       // Remove loading message and add response
       setMessages((prev) => {
@@ -64,6 +83,7 @@ export const QueryProvider: React.FC<QueryProviderProps> = ({ children }) => {
         return [...withoutLoading, assistantMessage]
       })
     } catch (error) {
+      if (timerRef.current) clearInterval(timerRef.current)
       // Remove loading message and add error
       setMessages((prev) => {
         const withoutLoading = prev.filter((msg) => !msg.isLoading)
@@ -108,72 +128,35 @@ export const useQuery = () => {
 
 // Helper function to format compliance response
 const formatComplianceResponse = (response: ComplianceResponse): string => {
-  let formatted = ''
+  const parts: string[] = []
 
-  // NAAC Requirements
-  if (response.naac_requirement) {
-    formatted += `## 📋 NAAC Requirements\n\n${response.naac_requirement}\n\n`
-  }
-
-  // MVSR Evidence
-  if (response.mvsr_evidence) {
-    formatted += `## 🎓 MVSR Evidence\n\n${response.mvsr_evidence}\n\n`
-  }
-
-  // NAAC Mapping
-  if (response.naac_mapping) {
-    formatted += `## 🗺️ NAAC Criterion Mapping\n\n${response.naac_mapping}\n\n`
-  }
-
-  // Compliance Analysis
+  // Primary answer — always show compliance_analysis as the main answer
   if (response.compliance_analysis) {
-    formatted += `## 🔍 Compliance Analysis\n\n${response.compliance_analysis}\n\n`
+    parts.push(response.compliance_analysis)
   }
 
-  // Status
+  // Status badge
   if (response.status) {
-    const statusIcon = getStatusIcon(response.status)
-    formatted += `## ${statusIcon} Compliance Status\n\n**${response.status}**\n\n`
+    const icon = getStatusIcon(response.status)
+    parts.push(`\n---\n${icon} **Status:** ${response.status}`)
   }
 
-  // Recommendations
+  // NAAC requirements if meaningful
+  if (response.naac_requirement && !response.naac_requirement.startsWith('NAAC context retrieved')) {
+    parts.push(`\n**📋 NAAC Requirements:**\n${response.naac_requirement}`)
+  }
+
+  // MVSR evidence if meaningful
+  if (response.mvsr_evidence && !response.mvsr_evidence.startsWith('MVSR evidence retrieved')) {
+    parts.push(`\n**🎓 MVSR Evidence:**\n${response.mvsr_evidence}`)
+  }
+
+  // Recommendations if present
   if (response.recommendations) {
-    formatted += `## 💡 Recommendations\n\n${response.recommendations}\n\n`
+    parts.push(`\n**💡 Recommendations:**\n${response.recommendations}`)
   }
 
-  // Confidence Score
-  if (response.confidence_score !== undefined) {
-    const confidencePercent = Math.round(response.confidence_score * 100)
-    formatted += `## 📊 Analysis Confidence\n\n**${confidencePercent}%** confidence in this analysis\n\n`
-  }
-
-  // Compliance Score Details
-  if (response.compliance_score) {
-    formatted += `## 📈 Detailed Scoring\n\n`
-    
-    if (response.compliance_score.overall_score !== undefined) {
-      formatted += `**Overall Compliance Score:** ${Math.round(response.compliance_score.overall_score * 100)}%\n\n`
-    }
-
-    if (response.compliance_score.category_scores) {
-      formatted += `**Category Breakdown:**\n`
-      Object.entries(response.compliance_score.category_scores).forEach(([category, score]) => {
-        const percentage = Math.round((score as number) * 100)
-        formatted += `- ${category}: ${percentage}%\n`
-      })
-      formatted += '\n'
-    }
-
-    if (response.compliance_score.gap_analysis) {
-      formatted += `**Gap Areas:**\n`
-      response.compliance_score.gap_analysis.forEach((gap: string) => {
-        formatted += `- ${gap}\n`
-      })
-      formatted += '\n'
-    }
-  }
-
-  return formatted.trim()
+  return parts.join('\n').trim() || 'I was unable to generate a response. Please try again.'
 }
 
 const getStatusIcon = (status: string): string => {

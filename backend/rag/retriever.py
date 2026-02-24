@@ -29,7 +29,7 @@ class ComplianceRetriever:
                  chroma_store: ChromaVectorStore,
                  default_k_naac: int = 5,
                  default_k_mvsr: int = 5,
-                 similarity_threshold: float = 0.7):
+                 similarity_threshold: float = 0.3):
         """
         Initialize the retriever
         

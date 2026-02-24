@@ -51,13 +51,13 @@ class RAGPipeline:
             chroma_store=chroma_store,
             default_k_naac=retrieval_config.get('default_k_naac', 5),
             default_k_mvsr=retrieval_config.get('default_k_mvsr', 5),
-            similarity_threshold=retrieval_config.get('similarity_threshold', 0.7)
+            similarity_threshold=retrieval_config.get('similarity_threshold', 0.3)
         )
         
         # Initialize generator
         self.generator = ComplianceGenerator(
             ollama_client=ollama_client,
-            max_context_length=retrieval_config.get('max_context_length', 8000)
+            max_context_length=retrieval_config.get('max_context_length', 3000)
         )
         
         # Query processing patterns

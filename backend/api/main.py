@@ -3,7 +3,7 @@ FastAPI Main Application for NAAC Compliance Intelligence System
 Provides REST API endpoints for the complete RAG pipeline and auto-update system
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -16,14 +16,13 @@ import os
 from contextlib import asynccontextmanager
 
 # Import our system components
-from backend.rag.pipeline import RAGPipeline
-from backend.rag.metadata_mapper import NAACMetadataMapper
-from backend.db.chroma_store import ChromaVectorStore
-from backend.llm.ollama_client import OllamaClient
-from backend.ingestion.ingest import DocumentIngestionPipeline
-from backend.updater.auto_ingest import NAACAutoIngest
-from backend.scheduler.update_scheduler import NAACUpdateScheduler
-from backend.config.settings import settings
+from ..rag.pipeline import RAGPipeline
+from ..rag.metadata_mapper import NAACMetadataMapper
+from ..db.chroma_store import ChromaVectorStore
+from ..llm.ollama_client import OllamaClient
+from ..ingestion.ingest import DocumentIngestionPipeline
+from ..updater.auto_ingest import NAACAutoIngest
+from ..scheduler.update_scheduler import NAACUpdateScheduler
 from ..config.settings import get_settings
 
 # Get application settings
@@ -100,6 +99,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Create API router with /api prefix
+api_router = APIRouter(prefix="/api")
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -110,6 +112,75 @@ app.add_middleware(
 )
 
 # System initialization functions
+def _ingest_markdown_docs(chroma_store: ChromaVectorStore, data_dir: Path) -> None:
+    """Ingest markdown/text documents into ChromaDB if collections are empty."""
+    try:
+        # Check if already populated
+        naac_count = chroma_store.naac_collection.count()
+        mvsr_count = chroma_store.mvsr_collection.count()
+        if naac_count > 0 and mvsr_count > 0:
+            logger.info(f"Collections already have data: {naac_count} NAAC, {mvsr_count} MVSR docs. Skipping ingestion.")
+            return
+
+        def chunk_text(text: str, size: int = 800, overlap: int = 100) -> List[str]:
+            words = text.split()
+            chunks, i = [], 0
+            while i < len(words):
+                chunk = " ".join(words[i:i + size])
+                if chunk.strip():
+                    chunks.append(chunk)
+                i += size - overlap
+            return chunks
+
+        # Ingest NAAC documents
+        naac_dir = data_dir / "naac_documents"
+        if naac_dir.exists():
+            for f in naac_dir.glob("*"):
+                if f.suffix.lower() in {".md", ".txt"}:
+                    text = f.read_text(encoding="utf-8", errors="ignore")
+                    chunks = chunk_text(text)
+                    if not chunks:
+                        continue
+                    criterion = "1"
+                    for c in ["1","2","3","4","5","6","7"]:
+                        if f"criterion_{c}" in f.name.lower() or f"criteria_{c}" in f.name.lower():
+                            criterion = c; break
+                    metadatas = [{
+                        "type": "requirement", "criterion": criterion,
+                        "version": "2025", "source_file": f.name,
+                        "indicator": f"{criterion}.1"
+                    } for _ in chunks]
+                    chroma_store.add_naac_documents(chunks, metadatas)
+                    logger.info(f"Ingested NAAC file: {f.name} ({len(chunks)} chunks)")
+
+        # Ingest MVSR documents
+        mvsr_dir = data_dir / "mvsr_documents"
+        if mvsr_dir.exists():
+            for f in mvsr_dir.glob("*"):
+                if f.suffix.lower() in {".md", ".txt"}:
+                    text = f.read_text(encoding="utf-8", errors="ignore")
+                    chunks = chunk_text(text)
+                    if not chunks:
+                        continue
+                    category = "general"
+                    if "research" in f.name.lower():
+                        category = "research"
+                    elif "academic" in f.name.lower():
+                        category = "academic"
+                    metadatas = [{
+                        "type": "evidence", "criterion": "1",
+                        "document": f.stem.replace("_", " "),
+                        "year": 2024, "category": category,
+                        "source_file": f.name
+                    } for _ in chunks]
+                    chroma_store.add_mvsr_documents(chunks, metadatas)
+                    logger.info(f"Ingested MVSR file: {f.name} ({len(chunks)} chunks)")
+
+        logger.info("Startup document ingestion complete.")
+    except Exception as e:
+        logger.error(f"Startup ingestion failed (non-fatal): {e}")
+
+
 async def initialize_system():
     """Initialize all system components"""
     global rag_pipeline, auto_ingest, scheduler, metadata_mapper
@@ -149,6 +220,9 @@ async def initialize_system():
         
         # Start scheduler
         scheduler.start()
+        
+        # Ingest markdown knowledge base docs if collections are empty
+        await asyncio.to_thread(_ingest_markdown_docs, chroma_store, settings.get_data_path())
         
         logger.info("All system components initialized")
         
@@ -190,7 +264,7 @@ def get_metadata_mapper() -> NAACMetadataMapper:
 
 # API Endpoints
 
-@app.get("/health")
+@api_router.get("/health")
 async def health_check():
     """System health check"""
     try:
@@ -226,7 +300,7 @@ async def health_check():
             }
         )
 
-@app.post("/query", response_model=ComplianceResponse)
+@api_router.post("/query", response_model=ComplianceResponse)
 async def query_compliance(request: QueryRequest, pipeline: RAGPipeline = Depends(get_rag_pipeline)):
     """
     Query the NAAC compliance system
@@ -236,10 +310,12 @@ async def query_compliance(request: QueryRequest, pipeline: RAGPipeline = Depend
     try:
         logger.info(f"Processing query: {request.query[:100]}...")
         
-        # Process query through RAG pipeline
-        response = pipeline.process_query(
-            user_query=request.query,
-            context_filters=request.filters
+        # Process query through RAG pipeline (run sync function in thread to avoid blocking)
+        import asyncio
+        response = await asyncio.to_thread(
+            pipeline.process_query,
+            request.query,
+            request.filters
         )
         
         # Format response
@@ -261,7 +337,7 @@ async def query_compliance(request: QueryRequest, pipeline: RAGPipeline = Depend
         logger.error(f"Query processing failed: {e}")
         raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
 
-@app.post("/ingest")
+@api_router.post("/ingest")
 async def ingest_documents(
     request: IngestRequest,
     background_tasks: BackgroundTasks,
@@ -314,7 +390,7 @@ async def ingest_documents(
         logger.error(f"Ingestion request failed: {e}")
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
 
-@app.post("/force-update")
+@api_router.post("/force-update")
 async def force_system_update(
     request: UpdateRequest,
     background_tasks: BackgroundTasks,
@@ -356,7 +432,7 @@ async def force_system_update(
         logger.error(f"Update request failed: {e}")
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
-@app.get("/last-sync")
+@api_router.get("/last-sync")
 async def get_last_sync(auto_ingest_system: NAACAutoIngest = Depends(get_auto_ingest)):
     """
     Get information about the last synchronization
@@ -378,7 +454,7 @@ async def get_last_sync(auto_ingest_system: NAACAutoIngest = Depends(get_auto_in
         logger.error(f"Last sync request failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get sync status: {str(e)}")
 
-@app.get("/scheduler/status")
+@api_router.get("/scheduler/status")
 async def get_scheduler_status(scheduler_system: NAACUpdateScheduler = Depends(get_scheduler)):
     """Get scheduler status and job information"""
     try:
@@ -395,7 +471,7 @@ async def get_scheduler_status(scheduler_system: NAACUpdateScheduler = Depends(g
         logger.error(f"Scheduler status request failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get scheduler status: {str(e)}")
 
-@app.post("/scheduler/schedule")
+@api_router.post("/scheduler/schedule")
 async def schedule_job(
     request: ScheduleRequest,
     scheduler_system: NAACUpdateScheduler = Depends(get_scheduler)
@@ -448,7 +524,7 @@ async def schedule_job(
         logger.error(f"Job scheduling failed: {e}")
         raise HTTPException(status_code=500, detail=f"Scheduling failed: {str(e)}")
 
-@app.post("/scheduler/jobs/{job_id}/pause")
+@api_router.post("/scheduler/jobs/{job_id}/pause")
 async def pause_job(job_id: str, scheduler_system: NAACUpdateScheduler = Depends(get_scheduler)):
     """Pause a scheduled job"""
     try:
@@ -463,7 +539,7 @@ async def pause_job(job_id: str, scheduler_system: NAACUpdateScheduler = Depends
         logger.error(f"Job pause failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to pause job: {str(e)}")
 
-@app.post("/scheduler/jobs/{job_id}/resume")
+@api_router.post("/scheduler/jobs/{job_id}/resume")
 async def resume_job(job_id: str, scheduler_system: NAACUpdateScheduler = Depends(get_scheduler)):
     """Resume a paused job"""
     try:
@@ -478,7 +554,7 @@ async def resume_job(job_id: str, scheduler_system: NAACUpdateScheduler = Depend
         logger.error(f"Job resume failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to resume job: {str(e)}")
 
-@app.delete("/scheduler/jobs/{job_id}")
+@api_router.delete("/scheduler/jobs/{job_id}")
 async def remove_job(job_id: str, scheduler_system: NAACUpdateScheduler = Depends(get_scheduler)):
     """Remove a scheduled job"""
     try:
@@ -493,7 +569,7 @@ async def remove_job(job_id: str, scheduler_system: NAACUpdateScheduler = Depend
         logger.error(f"Job removal failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to remove job: {str(e)}")
 
-@app.get("/mapping/analyze")
+@api_router.get("/mapping/analyze")
 async def analyze_query_mapping(
     query: str,
     mapper: NAACMetadataMapper = Depends(get_metadata_mapper)
@@ -516,7 +592,7 @@ async def analyze_query_mapping(
         logger.error(f"Mapping analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Mapping analysis failed: {str(e)}")
 
-@app.get("/stats")
+@api_router.get("/stats")
 async def get_system_statistics(
     pipeline: RAGPipeline = Depends(get_rag_pipeline),
     auto_ingest_system: NAACAutoIngest = Depends(get_auto_ingest)
@@ -537,7 +613,7 @@ async def get_system_statistics(
         raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
 
 # File upload endpoint
-@app.post("/upload")
+@api_router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
     document_type: str = "mvsr_evidence",
@@ -591,6 +667,9 @@ async def upload_document(
     except Exception as e:
         logger.error(f"File upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+# Include the API router in the main app
+app.include_router(api_router)
 
 if __name__ == "__main__":
     import uvicorn

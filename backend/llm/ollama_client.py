@@ -100,13 +100,16 @@ class OllamaClient:
                 options={
                     "temperature": 0.1,  # Low temperature for consistent, factual responses
                     "top_p": 0.9,
-                    "max_tokens": 2048,
+                    "num_predict": 512,
                     "stop": ["</response>"]
                 }
             )
             
-            # Parse and structure the response
-            generated_text = response['response']
+            # Parse and structure the response — handle both object and dict styles
+            if hasattr(response, 'response'):
+                generated_text = response.response
+            else:
+                generated_text = response['response']
             structured_response = self._parse_compliance_response(generated_text, naac_metadata, mvsr_metadata)
             
             logger.info("Generated compliance response successfully")
@@ -122,68 +125,30 @@ class OllamaClient:
                                mvsr_context: List[str],
                                naac_metadata: List[Dict],
                                mvsr_metadata: List[Dict]) -> str:
-        """Build comprehensive prompt for compliance analysis"""
+        """Build a concise prompt suitable for small LLMs"""
         
-        # Format NAAC requirements section
-        naac_section = ""
-        if naac_context and naac_metadata:
-            naac_section = "NAAC REQUIREMENTS:\n"
-            for i, (doc, meta) in enumerate(zip(naac_context, naac_metadata)):
-                criterion = meta.get('criterion', 'N/A')
-                indicator = meta.get('indicator', 'N/A')
-                naac_section += f"Criterion {criterion}, Indicator {indicator}:\n{doc}\n\n"
+        context_parts = []
         
-        # Format MVSR evidence section
-        mvsr_section = ""
-        if mvsr_context and mvsr_metadata:
-            mvsr_section = "MVSR EVIDENCE:\n"
-            for i, (doc, meta) in enumerate(zip(mvsr_context, mvsr_metadata)):
-                doc_name = meta.get('document', 'Unknown Document')
-                year = meta.get('year', 'N/A')
-                mvsr_section += f"{doc_name} ({year}):\n{doc}\n\n"
+        if naac_context:
+            naac_text = "\n".join(naac_context[:2])[:1500]  # Limit context
+            context_parts.append(f"NAAC Requirements:\n{naac_text}")
         
-        prompt = f"""You are an expert NAAC compliance analyst for MVSR Engineering College. Analyze the provided information to answer the user's query with precision and structure.
+        if mvsr_context:
+            mvsr_text = "\n".join(mvsr_context[:2])[:1500]
+            context_parts.append(f"MVSR Evidence:\n{mvsr_text}")
+        
+        context_block = "\n\n".join(context_parts) if context_parts else "No specific context retrieved. Answer based on general NAAC knowledge."
+        
+        prompt = f"""You are an expert NAAC compliance assistant for MVSR Engineering College (Malla Reddy Vishnu Engineering College for Women).
 
-USER QUERY: {user_query}
+Question: {user_query}
 
-{naac_section}
+Context:
+{context_block}
 
-{mvsr_section}
+Answer the question concisely. Cover: relevant NAAC requirements, MVSR evidence/practices, compliance status, and recommendations if needed. Be factual and specific.
 
-INSTRUCTIONS:
-1. Provide a comprehensive analysis comparing NAAC requirements with MVSR evidence
-2. Be specific about criterion mappings and compliance status
-3. Identify gaps or strengths clearly
-4. Use only the provided context - do not make assumptions
-5. Structure your response as follows:
-
-<response>
-<naac_requirement>
-[Summarize relevant NAAC requirements from the context]
-</naac_requirement>
-
-<mvsr_evidence>
-[Summarize relevant MVSR evidence and practices from the context]
-</mvsr_evidence>
-
-<naac_mapping>
-[Specify the primary NAAC criterion and indicators that apply]
-</naac_mapping>
-
-<compliance_analysis>
-[Detailed analysis of how MVSR evidence aligns with or gaps from NAAC requirements]
-</compliance_analysis>
-
-<status>
-[One of: "Fully Supported", "Partially Supported", "Gap Identified", "Insufficient Evidence"]
-</status>
-
-<recommendations>
-[Specific actionable recommendations if gaps are identified]
-</recommendations>
-</response>
-
-Generate the response now:"""
+Answer:"""
         
         return prompt
     
@@ -212,6 +177,16 @@ Generate the response now:"""
             status = extract_section(generated_text, "status")
             recommendations = extract_section(generated_text, "recommendations")
             
+            # Fallback: if the LLM didn't use XML tags, use raw text as the analysis
+            if not compliance_analysis and generated_text.strip():
+                compliance_analysis = generated_text.strip()
+            
+            if not naac_requirement and naac_metadata:
+                naac_requirement = f"NAAC context retrieved from {len(naac_metadata)} source(s)."
+            
+            if not mvsr_evidence and mvsr_metadata:
+                mvsr_evidence = f"MVSR evidence retrieved from {len(mvsr_metadata)} source(s)."
+            
             # Determine primary criterion from metadata
             primary_criterion = "General"
             if naac_metadata and naac_metadata[0].get('criterion'):
@@ -219,12 +194,24 @@ Generate the response now:"""
                 if naac_metadata[0].get('indicator'):
                     primary_criterion += f".{naac_metadata[0]['indicator']}"
             
+            # Infer a reasonable status from the text if not parsed
+            if not status:
+                text_lower = generated_text.lower()
+                if any(w in text_lower for w in ["gap", "missing", "lacking", "deficien"]):
+                    status = "Gap Identified"
+                elif any(w in text_lower for w in ["partial", "partially", "some areas"]):
+                    status = "Partially Supported"
+                elif any(w in text_lower for w in ["fully", "meets", "satisfies", "compliant"]):
+                    status = "Fully Supported"
+                else:
+                    status = "Partially Supported"
+            
             return {
                 "naac_requirement": naac_requirement,
                 "mvsr_evidence": mvsr_evidence,
                 "naac_mapping": naac_mapping if naac_mapping else primary_criterion,
                 "compliance_analysis": compliance_analysis,
-                "status": status if status else "Insufficient Evidence",
+                "status": status,
                 "recommendations": recommendations,
                 "query_processed": True,
                 "context_sources": {
@@ -256,9 +243,10 @@ Generate the response now:"""
             response = self.client.generate(
                 model=self.model_name,
                 prompt="Hello, respond with 'OK' if you're working.",
-                options={"max_tokens": 10}
+                options={"num_predict": 10}
             )
-            return "OK" in response['response'] or len(response['response']) > 0
+            text = response.response if hasattr(response, 'response') else response['response']
+            return len(text) > 0
         except:
             return False
     
