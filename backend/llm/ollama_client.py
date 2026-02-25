@@ -139,7 +139,7 @@ class OllamaClient:
         
         context_block = "\n\n".join(context_parts) if context_parts else "No specific context retrieved. Answer based on general NAAC knowledge."
         
-        prompt = f"""You are an expert NAAC compliance assistant for MVSR Engineering College (Malla Reddy Vishnu Engineering College for Women).
+        prompt = f"""You are an expert NAAC compliance assistant for MVSR Engineering College (Maturi Venkata Subba Rao Engineering College).
 
 Question: {user_query}
 
