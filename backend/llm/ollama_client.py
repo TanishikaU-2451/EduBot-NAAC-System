@@ -141,7 +141,7 @@ class OllamaClient:
         
         prompt = f"""You are an expert NAAC compliance assistant for MVSR Engineering College (Maturi Venkata Subba Rao Engineering College).
 
-Question: {user_query}
+Question: {user_query}str
 
 Context:
 {context_block}
