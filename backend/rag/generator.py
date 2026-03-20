@@ -1,6 +1,6 @@
 """
 RAG Generator Component for NAAC Compliance Intelligence System
-Handles response generation using retrieved context and Ollama LLM
+Handles response generation using retrieved context and Hugging Face LLM
 """
 
 from typing import Dict, Any, List, Optional, Tuple
@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass
 import json
 
-from ..llm.ollama_client import OllamaClient
+from ..llm.huggingface_client import HuggingFaceClient
 from .retriever import RetrievalResult
 
 logger = logging.getLogger(__name__)
@@ -28,16 +28,16 @@ class ComplianceGenerator:
     """
     
     def __init__(self, 
-                 ollama_client: OllamaClient,
+                 llm_client: HuggingFaceClient,
                  max_context_length: int = 8000):
         """
         Initialize the generator
         
         Args:
-            ollama_client: Ollama client for LLM interaction
+            llm_client: Hugging Face client for LLM interaction
             max_context_length: Maximum context length to send to LLM
         """
-        self.ollama_client = ollama_client
+        self.llm_client = llm_client
         self.max_context_length = max_context_length
     
     def generate_compliance_response(self, 
@@ -62,8 +62,8 @@ class ComplianceGenerator:
             naac_context, mvsr_context
         )
         
-        # Generate response using Ollama
-        response = self.ollama_client.generate_compliance_response(
+        # Generate response using configured LLM client
+        response = self.llm_client.generate_compliance_response(
             user_query=context.user_query,
             naac_context=naac_context,
             mvsr_context=mvsr_context,

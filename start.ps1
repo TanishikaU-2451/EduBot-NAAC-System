@@ -1,6 +1,19 @@
 # EduBot NAAC System - Start Both Services
 Write-Host "Starting EduBot NAAC System..." -ForegroundColor Cyan
 
+# Validate HF token
+$envFile = Join-Path $PSScriptRoot ".env"
+if (-not (Test-Path $envFile)) {
+    Write-Host "Missing .env file. Create one from .env.example first." -ForegroundColor Red
+    exit 1
+}
+
+$hfTokenLine = Select-String -Path $envFile -Pattern '^HF_API_TOKEN=' -ErrorAction SilentlyContinue
+if (-not $hfTokenLine -or [string]::IsNullOrWhiteSpace(($hfTokenLine.Line -split '=',2)[1])) {
+    Write-Host "HF_API_TOKEN is missing or empty in .env" -ForegroundColor Red
+    exit 1
+}
+
 # Kill any old processes on ports 8000 and 3000
 Get-Process -Name python* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Get-Process -Name node* -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq "" } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -36,4 +49,4 @@ Write-Host "Both services started!" -ForegroundColor Green
 Write-Host "  Frontend: http://localhost:3000" -ForegroundColor Cyan
 Write-Host "  Backend:  http://localhost:8000" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "NOTE: First chatbot response takes ~60 seconds (CPU-based LLM)." -ForegroundColor White
+Write-Host "NOTE: First chatbot response may take longer depending on Hugging Face API latency." -ForegroundColor White

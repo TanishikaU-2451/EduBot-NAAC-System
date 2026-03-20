@@ -5,55 +5,32 @@ echo Quick Start Setup
 echo ========================================
 echo.
 
-REM Step 1: Check Ollama Installation
-echo [1/4] Checking Ollama installation...
-ollama --version >nul 2>&1
-if errorlevel 1 (
-    echo ❌ Ollama not found. Please install first:
-    echo    1. Download from https://ollama.ai/download/windows
-    echo    2. Install and restart terminal
-    echo    3. Run: setup-ollama.bat
-    echo    4. Then run this script again
-    pause
-    exit /b 1
-)
-echo ✅ Ollama is installed
-
-REM Step 2: Check Llama3 Model
-echo [2/4] Checking Llama3 model...
-ollama list | findstr llama3 >nul 2>&1
-if errorlevel 1 (
-    echo ❌ Llama3 model not found. Installing now...
-    echo This may take 5-10 minutes depending on internet speed...
-    ollama pull llama3
-    if errorlevel 1 (
-        echo ❌ Failed to download Llama3 model
-        echo Check your internet connection and try again
-        pause
-        exit /b 1
-    )
-    echo ✅ Llama3 model installed successfully
+REM Step 1: Check .env file
+echo [1/3] Checking environment file...
+if not exist ".env" (
+    copy .env.example .env
+    echo ✅ Created .env from template
 ) else (
-    echo ✅ Llama3 model is available
+    echo ✅ .env file found
 )
 
-REM Step 3: Start Ollama Service
-echo [3/4] Starting Ollama service...
-start /B ollama serve
-timeout /t 3 /nobreak >nul
+REM Step 2: Check Hugging Face token
+echo [2/3] Checking HF_API_TOKEN...
+set HF_API_TOKEN_VALUE=
+for /f "tokens=1,* delims==" %%A in ('findstr /B /C:"HF_API_TOKEN=" .env') do set HF_API_TOKEN_VALUE=%%B
 
-REM Test Ollama connection
-curl -s http://localhost:11434/api/tags >nul 2>&1
-if errorlevel 1 (
-    echo ❌ Ollama service not responding
-    echo Please ensure Ollama is running and try again
+if "%HF_API_TOKEN_VALUE%"=="" (
+    echo ❌ HF_API_TOKEN is missing or empty in .env
+    echo    1. Create a Hugging Face token from https://huggingface.co/settings/tokens
+    echo    2. Edit .env and set HF_API_TOKEN=your_token_here
+    echo    3. Run this script again
     pause
     exit /b 1
 )
-echo ✅ Ollama service is running
+echo ✅ HF_API_TOKEN is configured
 
-REM Step 4: Display next steps
-echo [4/4] Ready to start system!
+REM Step 3: Display next steps
+echo [3/3] Ready to start system!
 echo.
 echo ========================================
 echo NEXT STEPS:

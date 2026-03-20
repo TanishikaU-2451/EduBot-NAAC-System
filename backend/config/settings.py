@@ -26,10 +26,10 @@ class Settings(BaseSettings):
     chroma_db_path: str = Field("./chroma_db", env="CHROMA_DB_PATH")
     job_store_url: str = Field("sqlite:///jobs.sqlite", env="JOB_STORE_URL")
     
-    # Ollama settings
-    ollama_host: str = Field("http://localhost:11434", env="OLLAMA_HOST")
-    ollama_model: str = Field("llama3.2:1b", env="OLLAMA_MODEL")
-    ollama_timeout: int = Field(120, env="OLLAMA_TIMEOUT")
+    # Hugging Face Inference API settings
+    hf_model: str = Field("meta-llama/Meta-Llama-3.1-8B-Instruct", env="HF_MODEL")
+    hf_api_token: Optional[str] = Field(None, env="HF_API_TOKEN")
+    hf_timeout: int = Field(120, env="HF_TIMEOUT")
     
     # Embedding settings
     embedding_model: str = Field("all-MiniLM-L6-v2", env="EMBEDDING_MODEL")

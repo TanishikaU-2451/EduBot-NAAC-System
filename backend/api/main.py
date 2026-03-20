@@ -26,7 +26,7 @@ except ImportError:
 from ..rag.pipeline import RAGPipeline
 from ..rag.metadata_mapper import NAACMetadataMapper
 from ..db.chroma_store import ChromaVectorStore
-from ..llm.ollama_client import OllamaClient
+from ..llm.huggingface_client import HuggingFaceClient
 from ..ingestion.ingest import DocumentIngestionPipeline
 from ..updater.auto_ingest import NAACAutoIngest
 from ..scheduler.update_scheduler import NAACUpdateScheduler
@@ -224,10 +224,11 @@ async def initialize_system():
         # Initialize ChromaDB
         chroma_store = ChromaVectorStore(persist_directory=str(settings.get_chroma_path()))
         
-        # Initialize Ollama client
-        ollama_client = OllamaClient(
-            model_name=settings.ollama_model,
-            host=settings.ollama_host
+        # Initialize Hugging Face client
+        llm_client = HuggingFaceClient(
+            model_name=settings.hf_model,
+            api_token=settings.hf_api_token,
+            timeout=settings.hf_timeout,
         )
         
         # Initialize ingestion pipeline
@@ -236,7 +237,7 @@ async def initialize_system():
         # Initialize RAG pipeline
         rag_pipeline = RAGPipeline(
             chroma_store=chroma_store,
-            ollama_client=ollama_client
+            llm_client=llm_client,
         )
         
         # Initialize auto-ingest system

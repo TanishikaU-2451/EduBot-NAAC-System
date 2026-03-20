@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 
 from ..db.chroma_store import ChromaVectorStore
-from ..llm.ollama_client import OllamaClient
+from ..llm.huggingface_client import HuggingFaceClient
 from .retriever import ComplianceRetriever, RetrievalResult
 from .generator import ComplianceGenerator, GenerationContext
 
@@ -32,18 +32,18 @@ class RAGPipeline:
     
     def __init__(self, 
                  chroma_store: ChromaVectorStore,
-                 ollama_client: OllamaClient,
+                 llm_client: HuggingFaceClient,
                  retrieval_config: Optional[Dict[str, Any]] = None):
         """
         Initialize RAG pipeline
         
         Args:
             chroma_store: ChromaDB vector store instance
-            ollama_client: Ollama LLM client
+            llm_client: LLM client
             retrieval_config: Configuration for retrieval parameters
         """
         self.chroma_store = chroma_store
-        self.ollama_client = ollama_client
+        self.llm_client = llm_client
         
         # Initialize retriever with custom config
         retrieval_config = retrieval_config or {}
@@ -56,7 +56,7 @@ class RAGPipeline:
         
         # Initialize generator
         self.generator = ComplianceGenerator(
-            ollama_client=ollama_client,
+            llm_client=llm_client,
             max_context_length=retrieval_config.get('max_context_length', 3000)
         )
         
@@ -361,17 +361,18 @@ class RAGPipeline:
             }
             health_status['overall_status'] = 'degraded'
         
-        # Test Ollama
+        # Test LLM connectivity
         try:
-            ollama_test = self.ollama_client.test_connection()
-            health_status['ollama'] = {
-                'status': 'healthy' if ollama_test else 'error',
-                'connection': ollama_test
+            llm_test = self.llm_client.test_connection()
+            health_status['llm'] = {
+                'status': 'healthy' if llm_test else 'error',
+                'connection': llm_test,
+                'provider': 'huggingface-inference-api'
             }
-            if not ollama_test:
+            if not llm_test:
                 health_status['overall_status'] = 'degraded'
         except Exception as e:
-            health_status['ollama'] = {
+            health_status['llm'] = {
                 'status': 'error',
                 'error': str(e)
             }
@@ -399,7 +400,7 @@ class RAGPipeline:
         return {
             'retrieval_stats': self.retriever.get_retrieval_stats(),
             'vector_store_stats': self.chroma_store.get_collection_stats(),
-            'model_info': self.ollama_client.get_model_info(),
+            'model_info': self.llm_client.get_model_info(),
             'pipeline_config': {
                 'max_context_length': self.generator.max_context_length,
                 'similarity_threshold': self.retriever.similarity_threshold,

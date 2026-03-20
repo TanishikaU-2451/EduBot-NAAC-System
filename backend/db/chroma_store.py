@@ -14,6 +14,7 @@ import logging
 
 # Setup logging
 logger = logging.getLogger(__name__)
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
 
 class ChromaVectorStore:
     """

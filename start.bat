@@ -30,15 +30,27 @@ if not exist ".env" (
     exit /b 1
 )
 
-REM Check if Ollama is running
-echo Checking Ollama service...
-curl -s http://localhost:11434/api/tags >nul 2>&1
+REM Validate Hugging Face token configuration
+findstr /B /C:"HF_API_TOKEN=" .env >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Ollama is not running or not accessible at http://localhost:11434
-    echo Please install and start Ollama with Llama3 model:
-    echo   1. Install Ollama from https://ollama.ai/
-    echo   2. Run: ollama pull llama3
-    echo   3. Ensure Ollama service is running
+    echo ERROR: HF_API_TOKEN is missing in .env
+    echo Add your Hugging Face token to .env and try again.
+    pause
+    exit /b 1
+)
+
+set HF_API_TOKEN_VALUE=
+for /f "tokens=1,* delims==" %%A in ('findstr /B /C:"HF_API_TOKEN=" .env') do set HF_API_TOKEN_VALUE=%%B
+if "%HF_API_TOKEN_VALUE%"=="" (
+    echo ERROR: HF_API_TOKEN is empty in .env
+    echo Add your Hugging Face token to .env and try again.
+    pause
+    exit /b 1
+)
+
+if "%HF_API_TOKEN_VALUE%"=="\"\"" (
+    echo ERROR: HF_API_TOKEN is empty in .env
+    echo Add your Hugging Face token to .env and try again.
     pause
     exit /b 1
 )
