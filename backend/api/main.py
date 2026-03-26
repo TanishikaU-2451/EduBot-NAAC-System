@@ -750,6 +750,12 @@ async def upload_document(
         logger.error(f"File upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
+# Expose key endpoints without the /api prefix for local probes and misconfigured proxies
+app.add_api_route("/health", health_check, methods=["GET"])
+app.add_api_route("/stats", get_system_statistics, methods=["GET"])
+app.add_api_route("/scheduler/status", get_scheduler_status, methods=["GET"])
+app.add_api_route("/query", query_compliance, methods=["POST"])
+
 # Include the API router in the main app
 app.include_router(api_router)
 

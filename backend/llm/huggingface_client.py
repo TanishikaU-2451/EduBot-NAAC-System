@@ -42,6 +42,7 @@ class HuggingFaceClient:
         )
 
         try:
+            # Prefer text-generation; if the endpoint only supports conversational, fall back.
             generated_text = self.client.text_generation(
                 prompt,
                 max_new_tokens=700,
@@ -59,6 +60,27 @@ class HuggingFaceClient:
             return structured_response
 
         except Exception as e:
+            # If the endpoint complains about task support, try the chat-completions style API.
+            error_text = str(e)
+            if "task" in error_text.lower() or "conversational" in error_text.lower():
+                try:
+                    chat_response = self.client.chat_completion(
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=700,
+                        temperature=0.1,
+                        top_p=0.9,
+                    )
+                    # chat_response.choices[0].message['content'] in HF client
+                    generated_text = chat_response.choices[0].message["content"] if chat_response and chat_response.choices else ""
+                    structured_response = self._parse_compliance_response(
+                        generated_text, naac_metadata, mvsr_metadata
+                    )
+                    logger.info("Generated compliance response via chat_completion fallback")
+                    return structured_response
+                except Exception as chat_err:
+                    logger.error(f"Chat completion fallback failed: {chat_err}")
+                    return self._get_error_response(str(chat_err))
+
             logger.error(f"Error generating Hugging Face response: {e}")
             return self._get_error_response(str(e))
 

@@ -27,7 +27,8 @@ class ApiService {
     // Add request interceptor for logging
     this.api.interceptors.request.use(
       (config) => {
-        console.log(`API Request: ${config.method?.toUpperCase()} ${config.url}`)
+        console.log(`[API] Making request: ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`)
+        console.log(`[API] Full URL: ${config.baseURL}${config.url}`)
         return config
       },
       (error) => {
