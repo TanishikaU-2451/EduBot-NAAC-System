@@ -6,6 +6,7 @@ Handles semantic retrieval from both NAAC requirements and MVSR evidence collect
 from typing import List, Dict, Any, Optional, Tuple
 import logging
 from dataclasses import dataclass
+import re
 
 from ..db.chroma_store import ChromaVectorStore
 
@@ -80,6 +81,46 @@ class ComplianceRetriever:
         
         logger.info(f"Retrieved {len(naac_results.documents)} NAAC and {len(mvsr_results.documents)} MVSR documents")
         
+        return naac_results, mvsr_results
+
+    def retrieve_compliance_context_hybrid(
+        self,
+        query: str,
+        k_naac: Optional[int] = None,
+        k_mvsr: Optional[int] = None,
+        criterion_filter: Optional[str] = None,
+        category_filter: Optional[str] = None,
+        dense_weight: float = 0.65,
+        lexical_weight: float = 0.35,
+        candidate_multiplier: int = 4,
+    ) -> Tuple[RetrievalResult, RetrievalResult]:
+        """
+        Hybrid retrieval using dense search candidates reranked with lexical overlap.
+
+        This is useful for compliance checking where exact phrases/conditions matter.
+        """
+        k_naac = k_naac or self.default_k_naac
+        k_mvsr = k_mvsr or self.default_k_mvsr
+
+        candidate_k_naac = max(k_naac * candidate_multiplier, k_naac)
+        candidate_k_mvsr = max(k_mvsr * candidate_multiplier, k_mvsr)
+
+        logger.info(
+            f"Hybrid retrieval for query: '{query[:100]}...' (dense={dense_weight:.2f}, lexical={lexical_weight:.2f})"
+        )
+
+        # Step 1: fetch larger dense candidate pools
+        naac_candidates = self._retrieve_naac_requirements(query, candidate_k_naac, criterion_filter)
+        mvsr_candidates = self._retrieve_mvsr_evidence(query, candidate_k_mvsr, category_filter)
+
+        # Step 2: rerank candidates with hybrid score
+        naac_results = self._hybrid_rerank(query, naac_candidates, k_naac, dense_weight, lexical_weight)
+        mvsr_results = self._hybrid_rerank(query, mvsr_candidates, k_mvsr, dense_weight, lexical_weight)
+
+        logger.info(
+            f"Hybrid retrieved {len(naac_results.documents)} NAAC and {len(mvsr_results.documents)} MVSR documents"
+        )
+
         return naac_results, mvsr_results
     
     def _retrieve_naac_requirements(self, 
@@ -171,6 +212,59 @@ class ComplianceRetriever:
         logger.debug(f"Filtered {len(documents)} -> {len(filtered_docs)} results by similarity threshold")
         
         return filtered_docs, filtered_metadatas, filtered_distances
+
+    def _hybrid_rerank(
+        self,
+        query: str,
+        candidates: RetrievalResult,
+        top_k: int,
+        dense_weight: float,
+        lexical_weight: float,
+    ) -> RetrievalResult:
+        """Rerank dense candidates with lexical token overlap and return top-k."""
+        if not candidates.documents:
+            return candidates
+
+        # Normalize weights to avoid accidental misconfiguration.
+        total_weight = max(dense_weight + lexical_weight, 1e-9)
+        dense_weight = dense_weight / total_weight
+        lexical_weight = lexical_weight / total_weight
+
+        query_tokens = self._tokenize_text(query)
+        scored_rows = []
+
+        for doc, meta, dist in zip(candidates.documents, candidates.metadatas, candidates.distances):
+            dense_similarity = max(0.0, 1 - dist)
+            lexical_similarity = self._lexical_overlap_score(query_tokens, self._tokenize_text(doc))
+            hybrid_score = (dense_weight * dense_similarity) + (lexical_weight * lexical_similarity)
+
+            # Keep similarity threshold gating behavior aligned with existing retriever logic.
+            if hybrid_score >= self.similarity_threshold:
+                scored_rows.append((hybrid_score, doc, meta, dist))
+
+        scored_rows.sort(key=lambda item: item[0], reverse=True)
+        top_rows = scored_rows[:top_k]
+
+        return RetrievalResult(
+            documents=[row[1] for row in top_rows],
+            metadatas=[row[2] for row in top_rows],
+            distances=[row[3] for row in top_rows],
+            source_type=candidates.source_type,
+        )
+
+    def _tokenize_text(self, text: str) -> List[str]:
+        """Simple normalized tokenizer tuned for rule/condition-style queries."""
+        return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+    def _lexical_overlap_score(self, query_tokens: List[str], doc_tokens: List[str]) -> float:
+        """Compute lexical overlap score as recall-style token coverage."""
+        if not query_tokens or not doc_tokens:
+            return 0.0
+
+        query_set = set(query_tokens)
+        doc_set = set(doc_tokens)
+        overlap = len(query_set.intersection(doc_set))
+        return overlap / max(len(query_set), 1)
     
     def retrieve_by_criterion(self, 
                             query: str, 
@@ -194,7 +288,7 @@ class ComplianceRetriever:
         # Enhance query with criterion context
         enhanced_query = f"NAAC criterion {criterion}: {query}"
         
-        return self.retrieve_compliance_context(
+        return self.retrieve_compliance_context_hybrid(
             enhanced_query,
             k_naac=k_naac,
             k_mvsr=k_mvsr,
@@ -220,7 +314,7 @@ class ComplianceRetriever:
         """
         logger.info(f"Retrieving for category {category}: '{query}'")
         
-        return self.retrieve_compliance_context(
+        return self.retrieve_compliance_context_hybrid(
             query,
             k_naac=k_naac,
             k_mvsr=k_mvsr,

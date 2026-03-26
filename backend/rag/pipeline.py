@@ -7,6 +7,8 @@ from typing import Dict, Any, Optional, List
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from collections import deque
 
 from ..db.chroma_store import ChromaVectorStore
 from ..llm.huggingface_client import HuggingFaceClient
@@ -44,9 +46,13 @@ class RAGPipeline:
         """
         self.chroma_store = chroma_store
         self.llm_client = llm_client
+        retrieval_config = retrieval_config or {}
+        self.retrieval_mode = retrieval_config.get('retrieval_mode', 'hybrid').lower()
+        self.dense_weight = retrieval_config.get('dense_weight', 0.65)
+        self.lexical_weight = retrieval_config.get('lexical_weight', 0.35)
+        self.candidate_multiplier = retrieval_config.get('candidate_multiplier', 4)
         
         # Initialize retriever with custom config
-        retrieval_config = retrieval_config or {}
         self.retriever = ComplianceRetriever(
             chroma_store=chroma_store,
             default_k_naac=retrieval_config.get('default_k_naac', 5),
@@ -63,7 +69,7 @@ class RAGPipeline:
         # Query processing patterns
         self.query_patterns = {
             'criterion_patterns': [
-                r'criterion\s*(\d+)', r'key\s*indicator\s*(\d+\.\d+)', 
+                r'criterion\s*(\d+)', r'key\s*indicator\s*(\d+\.\d+)',
                 r'naac\s*(\d+)', r'standard\s*(\d+)'
             ],
             'category_patterns': {
@@ -80,35 +86,40 @@ class RAGPipeline:
                 'requirements': ['requirement', 'expects', 'mandates', 'standard']
             }
         }
+
+        # Query tracking for statistics
+        self.query_history = deque(maxlen=1000)  # Store last 1000 queries
+        self.last_query_time = None
+        self.response_times = deque(maxlen=100)  # Store last 100 response times
     
-    def process_query(self, 
+    def process_query(self,
                      user_query: str,
                      context_filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Main query processing pipeline
-        
+
         Args:
             user_query: Natural language query from user
             context_filters: Optional filters for retrieval
-            
+
         Returns:
             Complete structured response
         """
         start_time = time.time()
-        
+
         logger.info(f"Processing query: '{user_query[:100]}...'")
-        
+
         try:
             # Step 1: Analyze and process query
             query_context = self._analyze_query(user_query)
-            
+
             # Step 2: Apply any provided filters
             if context_filters:
                 query_context.suggested_filters.update(context_filters)
-            
+
             # Step 3: Retrieve relevant context
             naac_results, mvsr_results = self._retrieve_context(query_context)
-            
+
             # Step 4: Generate response
             generation_context = GenerationContext(
                 user_query=user_query,
@@ -116,9 +127,9 @@ class RAGPipeline:
                 mvsr_results=mvsr_results,
                 additional_context={'query_analysis': query_context}
             )
-            
+
             response = self.generator.generate_compliance_response(generation_context)
-            
+
             # Step 5: Add pipeline metadata
             processing_time = time.time() - start_time
             response['pipeline_metadata'] = {
@@ -130,10 +141,19 @@ class RAGPipeline:
                     'mvsr_documents': len(mvsr_results.documents)
                 }
             }
-            
+
+            # Track query statistics
+            self.last_query_time = datetime.now().isoformat()
+            self.response_times.append(processing_time)
+            self.query_history.append({
+                'timestamp': self.last_query_time,
+                'query': user_query[:100],
+                'response_time': processing_time
+            })
+
             logger.info(f"Query processed successfully in {processing_time:.2f}s")
             return response
-            
+
         except Exception as e:
             logger.error(f"Error processing query: {e}")
             return self._generate_error_response(user_query, str(e))
@@ -220,11 +240,36 @@ class RAGPipeline:
     
     def _retrieve_context(self, query_context: QueryContext) -> tuple[RetrievalResult, RetrievalResult]:
         """Retrieve context based on query analysis"""
+
+        def retrieve_default(query_text: str, criterion_filter: Optional[str] = None, category_filter: Optional[str] = None):
+            if self.retrieval_mode == 'dense':
+                return self.retriever.retrieve_compliance_context(
+                    query_text,
+                    criterion_filter=criterion_filter,
+                    category_filter=category_filter
+                )
+
+            return self.retriever.retrieve_compliance_context_hybrid(
+                query_text,
+                criterion_filter=criterion_filter,
+                category_filter=category_filter,
+                dense_weight=self.dense_weight,
+                lexical_weight=self.lexical_weight,
+                candidate_multiplier=self.candidate_multiplier,
+            )
         
         # Determine retrieval strategy
         if query_context.query_type == 'criterion_specific':
             criterion = query_context.suggested_filters.get('criterion_filter')
             if criterion:
+                if self.retrieval_mode == 'dense':
+                    return self.retriever.retrieve_compliance_context(
+                        query_context.processed_query,
+                        k_naac=6,
+                        k_mvsr=4,
+                        criterion_filter=criterion,
+                    )
+
                 return self.retriever.retrieve_by_criterion(
                     query_context.processed_query,
                     criterion,
@@ -235,6 +280,14 @@ class RAGPipeline:
         elif query_context.query_type == 'evidence_lookup':
             category = query_context.suggested_filters.get('category_filter')
             if category:
+                if self.retrieval_mode == 'dense':
+                    return self.retriever.retrieve_compliance_context(
+                        query_context.processed_query,
+                        k_naac=3,
+                        k_mvsr=7,
+                        category_filter=category,
+                    )
+
                 return self.retriever.retrieve_by_category(
                     query_context.processed_query,
                     category,
@@ -243,10 +296,10 @@ class RAGPipeline:
                 )
         
         # Default retrieval
-        return self.retriever.retrieve_compliance_context(
+        return retrieve_default(
             query_context.processed_query,
             criterion_filter=query_context.suggested_filters.get('criterion_filter'),
-            category_filter=query_context.suggested_filters.get('category_filter')
+            category_filter=query_context.suggested_filters.get('category_filter'),
         )
     
     def batch_process_queries(self, 
@@ -396,15 +449,29 @@ class RAGPipeline:
     
     def get_pipeline_stats(self) -> Dict[str, Any]:
         """Get comprehensive pipeline statistics"""
-        
+
+        # Get collection stats
+        collection_stats = self.chroma_store.get_collection_stats()
+
+        # Calculate query count in last 24 hours
+        query_count_24h = 0
+        if self.query_history:
+            cutoff_time = datetime.now() - timedelta(hours=24)
+            query_count_24h = sum(
+                1 for q in self.query_history
+                if datetime.fromisoformat(q['timestamp']) > cutoff_time
+            )
+
+        # Calculate average response time
+        average_response_time = 0.0
+        if self.response_times:
+            average_response_time = sum(self.response_times) / len(self.response_times)
+
         return {
-            'retrieval_stats': self.retriever.get_retrieval_stats(),
-            'vector_store_stats': self.chroma_store.get_collection_stats(),
-            'model_info': self.llm_client.get_model_info(),
-            'pipeline_config': {
-                'max_context_length': self.generator.max_context_length,
-                'similarity_threshold': self.retriever.similarity_threshold,
-                'default_k_naac': self.retriever.default_k_naac,
-                'default_k_mvsr': self.retriever.default_k_mvsr
-            }
+            'total_documents': collection_stats.get('total_documents', 0),
+            'naac_documents': collection_stats.get('naac_requirements_count', 0),
+            'mvsr_documents': collection_stats.get('mvsr_evidence_count', 0),
+            'query_count_24h': query_count_24h,
+            'average_response_time': round(average_response_time, 3),
+            'last_query_time': self.last_query_time
         }

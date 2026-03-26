@@ -13,8 +13,6 @@ import {
   List,
   ListItem,
   ListItemText,
-  IconButton,
-  Tooltip,
 } from '@mui/material'
 import {
   Refresh as RefreshIcon,
@@ -188,7 +186,7 @@ const SystemDashboard: React.FC = () => {
                   <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                     <Typography variant="body2">Avg Response Time:</Typography>
                     <Typography variant="body2" fontWeight="bold">
-                      {systemStats.pipeline_statistics.average_response_time.toFixed(2)}s
+                      {(systemStats.pipeline_statistics.average_response_time ?? 0).toFixed(2)}s
                     </Typography>
                   </Box>
                 </Box>

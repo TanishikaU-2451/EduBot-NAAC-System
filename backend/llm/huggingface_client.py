@@ -73,29 +73,65 @@ class HuggingFaceClient:
         context_parts = []
 
         if naac_context:
-            naac_text = "\n".join(naac_context[:2])[:1500]
-            context_parts.append(f"NAAC Requirements:\n{naac_text}")
+            naac_text = "\n".join(naac_context[:3])[:2200]
+            context_parts.append(f"NAAC REQUIREMENT CONTEXT:\n{naac_text}")
 
         if mvsr_context:
-            mvsr_text = "\n".join(mvsr_context[:2])[:1500]
-            context_parts.append(f"MVSR Evidence:\n{mvsr_text}")
+            mvsr_text = "\n".join(mvsr_context[:3])[:2200]
+            context_parts.append(f"COLLEGE REPORT / EVIDENCE CONTEXT:\n{mvsr_text}")
 
         context_block = (
             "\n\n".join(context_parts)
             if context_parts
-            else "No specific context retrieved. Answer based on general NAAC knowledge."
+            else "No retrieved context is available. Mark evidence sufficiency as low and avoid unsupported claims."
         )
 
-        prompt = f"""You are an expert NAAC compliance assistant for MVSR Engineering College (Maturi Venkata Subba Rao Engineering College).
+        naac_meta_summary = ", ".join(
+            [f"criterion={m.get('criterion', 'N/A')}, indicator={m.get('indicator', 'N/A')}" for m in naac_metadata[:5]]
+        ) or "N/A"
+        mvsr_meta_summary = ", ".join(
+            [f"doc={m.get('document', 'N/A')}, category={m.get('category', 'N/A')}, year={m.get('year', 'N/A')}" for m in mvsr_metadata[:5]]
+        ) or "N/A"
 
-Question: {user_query}
+        prompt = f"""You are a NAAC compliance audit assistant.
 
-Context:
+Primary task:
+Verify whether a college/university NAAC report satisfies applicable NAAC requirements.
+Identify mistakes, missing evidence, weak claims, or contradictions in the submitted report context.
+Provide corrective actions that are specific and practical for accreditation preparation.
+
+Operating rules:
+1) Treat NAAC requirement context as normative criteria.
+2) Treat college report/evidence context as claims to be validated.
+3) Do not assume compliance if evidence is weak or missing.
+4) If context is insufficient, explicitly say "Insufficient evidence" and list what must be provided.
+5) Prefer precision over verbosity.
+
+User query:
+{user_query}
+
+Retrieved metadata snapshot:
+- NAAC: {naac_meta_summary}
+- College evidence: {mvsr_meta_summary}
+
+Retrieved context:
 {context_block}
 
-Answer the question concisely. Cover: relevant NAAC requirements, MVSR evidence/practices, compliance status, and recommendations if needed. Be factual and specific.
+Audit workflow to follow:
+A) Extract the relevant NAAC conditions/checkpoints for this query.
+B) Check each condition against available college evidence.
+C) Mark each condition as Satisfied / Partially Satisfied / Not Satisfied / Insufficient Evidence.
+D) Identify specific mistakes (incorrect, unsupported, missing, contradictory statements).
+E) Provide prioritized remediation steps and documentation suggestions.
 
-Answer:"""
+Return output using ONLY these XML tags and in this order:
+<naac_requirement>List concise NAAC conditions/checkpoints being evaluated.</naac_requirement>
+<mvsr_evidence>Summarize evidence found in the uploaded college report/evidence relevant to each checkpoint.</mvsr_evidence>
+<naac_mapping>Map checkpoints to criterion/indicator and show per-checkpoint status: Satisfied/Partially Satisfied/Not Satisfied/Insufficient Evidence.</naac_mapping>
+<compliance_analysis>Explain end-to-end audit judgement, mistakes found, risk level, and confidence caveats.</compliance_analysis>
+<status>One of: Fully Supported, Partially Supported, Gap Identified, Insufficient Evidence, Processing Error.</status>
+<recommendations>Prioritized corrective actions with what document/proof to add or fix for each gap.</recommendations>
+"""
 
         return prompt
 

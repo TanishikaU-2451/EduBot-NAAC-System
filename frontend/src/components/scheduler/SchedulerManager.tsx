@@ -153,7 +153,7 @@ const SchedulerManager: React.FC = () => {
                   <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                     <Typography variant="body2">Uptime:</Typography>
                     <Typography variant="body2" fontWeight="bold">
-                      {schedulerStatus.scheduler_status.uptime_hours.toFixed(1)}h
+                      {(schedulerStatus.scheduler_status.uptime_hours ?? 0).toFixed(1)}h
                     </Typography>
                   </Box>
                   {schedulerStatus.scheduler_status.next_run_time && (

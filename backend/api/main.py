@@ -238,6 +238,15 @@ async def initialize_system():
         rag_pipeline = RAGPipeline(
             chroma_store=chroma_store,
             llm_client=llm_client,
+            retrieval_config={
+                "default_k_naac": settings.max_retrieval_results,
+                "default_k_mvsr": settings.max_retrieval_results,
+                "similarity_threshold": settings.similarity_threshold,
+                "retrieval_mode": settings.retrieval_mode,
+                "dense_weight": settings.retrieval_dense_weight,
+                "lexical_weight": settings.retrieval_lexical_weight,
+                "candidate_multiplier": settings.retrieval_candidate_multiplier,
+            },
         )
         
         # Initialize auto-ingest system
@@ -496,13 +505,50 @@ async def get_scheduler_status(scheduler_system: NAACUpdateScheduler = Depends(g
     try:
         status = scheduler_system.get_scheduler_status()
         jobs = scheduler_system.get_job_list()
-        
+
+        # Calculate uptime hours
+        uptime_hours = 0.0
+        if scheduler_system.start_time and status.is_running:
+            uptime_delta = datetime.now() - scheduler_system.start_time
+            uptime_hours = uptime_delta.total_seconds() / 3600
+
+        # Transform jobs to match frontend expectations
+        transformed_jobs = []
+        for job in jobs:
+            # Determine status based on job state
+            if not job.enabled:
+                job_status = 'paused'
+            elif job.last_result == 'failed':
+                job_status = 'failed'
+            elif job.next_run:
+                job_status = 'scheduled'
+            else:
+                job_status = 'paused'
+
+            transformed_jobs.append({
+                'id': job.job_id,
+                'name': job.description,
+                'job_type': job.job_type,
+                'schedule': job.schedule,
+                'next_run_time': job.next_run,
+                'status': job_status,
+                'created_at': datetime.now().isoformat(),  # Placeholder
+                'last_run': job.last_run,
+                'run_count': 0  # Placeholder - not tracked currently
+            })
+
+        # Transform to match frontend expectations
         return {
-            "scheduler_status": status,
-            "jobs": jobs,
+            "scheduler_status": {
+                "running": status.is_running,
+                "job_count": status.total_jobs,
+                "next_run_time": status.next_scheduled_update,
+                "uptime_hours": round(uptime_hours, 2)
+            },
+            "jobs": transformed_jobs,
             "timestamp": datetime.now().isoformat()
         }
-        
+
     except Exception as e:
         logger.error(f"Scheduler status request failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get scheduler status: {str(e)}")

@@ -91,19 +91,21 @@ class NAACUpdateScheduler:
         
         # Job tracking
         self.job_history = self._load_job_history()
-        
+        self.start_time = None  # Track when scheduler starts
+
         # Event callbacks
         self.event_callbacks: List[Callable[[str, Dict[str, Any]], None]] = []
-        
+
         # Setup scheduler event listeners
         self._setup_event_listeners()
     
     def start(self):
         """Start the scheduler"""
         try:
+            self.start_time = datetime.now()  # Record start time
             self.scheduler.start()
             logger.info("NAAC Update Scheduler started successfully")
-            
+
             # Setup default jobs if none exist
             self._setup_default_jobs()
             
@@ -353,25 +355,25 @@ class NAACUpdateScheduler:
     
     def get_scheduler_status(self) -> SchedulerStatus:
         """Get current scheduler status"""
-        
+
         jobs = self.scheduler.get_jobs()
         active_jobs = len([job for job in jobs if job.next_run_time])
         paused_jobs = len(jobs) - active_jobs
-        
+
         # Find next scheduled update
         next_update = None
         for job in jobs:
             if 'update' in job.id and job.next_run_time:
                 if not next_update or job.next_run_time < next_update:
                     next_update = job.next_run_time
-        
+
         # Get last update check from history
         last_update_check = None
         for entry in reversed(self.job_history):
             if entry.get('job_type') == 'update_check':
                 last_update_check = entry.get('timestamp')
                 break
-        
+
         return SchedulerStatus(
             is_running=self.scheduler.running,
             total_jobs=len(jobs),

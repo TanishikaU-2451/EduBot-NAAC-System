@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # Retrieval parameters
     max_retrieval_results: int = Field(10, env="MAX_RETRIEVAL_RESULTS")
     similarity_threshold: float = Field(0.3, env="SIMILARITY_THRESHOLD")
+    retrieval_mode: str = Field("hybrid", env="RETRIEVAL_MODE")
+    retrieval_dense_weight: float = Field(0.65, env="RETRIEVAL_DENSE_WEIGHT")
+    retrieval_lexical_weight: float = Field(0.35, env="RETRIEVAL_LEXICAL_WEIGHT")
+    retrieval_candidate_multiplier: int = Field(4, env="RETRIEVAL_CANDIDATE_MULTIPLIER")
     
     # CORS settings
     cors_origins: List[str] = Field(["*"], env="CORS_ORIGINS")
