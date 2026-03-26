@@ -77,7 +77,6 @@ const ChatInterface: React.FC = () => {
   const renderMessage = (message: ChatMessage) => {
     const isUser = message.type === 'user'
     const isSystem = message.type === 'system'
-    const isAssistant = message.type === 'assistant'
 
     return (
       <ListItem
