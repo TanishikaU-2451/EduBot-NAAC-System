@@ -99,7 +99,8 @@ class RAGPipeline:
     
     def process_query(self,
                      user_query: str,
-                     context_filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                     context_filters: Optional[Dict[str, Any]] = None,
+                     memory_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Main query processing pipeline
 
@@ -130,7 +131,10 @@ class RAGPipeline:
                 user_query=user_query,
                 naac_results=naac_results,
                 mvsr_results=mvsr_results,
-                additional_context={'query_analysis': query_context}
+                additional_context={
+                    'query_analysis': query_context,
+                    'memory_context': memory_context or {},
+                }
             )
 
             response = self.generator.generate_compliance_response(generation_context)

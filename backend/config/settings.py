@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     api_key: Optional[str] = Field(None, env="API_KEY")
     rate_limit_requests: int = Field(100, env="RATE_LIMIT_REQUESTS")
     rate_limit_window: int = Field(3600, env="RATE_LIMIT_WINDOW")  # seconds
+
+    # Memory layer settings
+    memory_enabled: bool = Field(True, env="MEMORY_ENABLED")
+    memory_short_ttl_days: int = Field(7, env="MEMORY_SHORT_TTL_DAYS")
+    memory_long_ttl_days: int = Field(365, env="MEMORY_LONG_TTL_DAYS")
+    memory_short_limit: int = Field(20, env="MEMORY_SHORT_LIMIT")
+    memory_long_top_k: int = Field(6, env="MEMORY_LONG_TOP_K")
     
     class Config:
         env_file = ".env"

@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
-from psycopg2.extras import Json
+from psycopg2.extras import Json, execute_batch
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
@@ -160,45 +160,8 @@ class SupabaseVectorStore:
         logger.info("Archived NAAC version %s", old_version)
 
     def consolidate_single_row_mode(self):
-        """Collapse historical multi-row chunk data into one row per doc_type."""
-        for doc_type in ["naac_requirement", "mvsr_evidence"]:
-            with self._get_connection() as conn, conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT content, metadata FROM {self.table_name} WHERE doc_type = %s",
-                    (doc_type,),
-                )
-                rows = cur.fetchall()
-
-            if len(rows) <= 1:
-                continue
-
-            docs: List[str] = []
-            metas: List[Dict[str, Any]] = []
-            for content, metadata in rows:
-                if content and str(content).strip():
-                    docs.append(str(content).strip())
-
-                if isinstance(metadata, dict):
-                    metas.append(metadata)
-                elif isinstance(metadata, str):
-                    try:
-                        parsed = json.loads(metadata)
-                        if isinstance(parsed, dict):
-                            metas.append(parsed)
-                        else:
-                            metas.append({})
-                    except Exception:
-                        metas.append({})
-                else:
-                    metas.append({})
-
-            if docs and metas and len(docs) == len(metas):
-                self._add_documents(docs, metas, doc_type)
-                logger.info(
-                    "Consolidated %s rows into one row for %s",
-                    len(rows),
-                    doc_type,
-                )
+        """Deprecated compatibility method. Chunk-row mode is now the default."""
+        logger.info("Chunk-row storage mode is active; consolidate_single_row_mode is skipped.")
 
     # Internal helpers
     def _add_documents(self, documents: List[str], metadatas: List[Dict[str, Any]], doc_type: str):
@@ -210,93 +173,94 @@ class SupabaseVectorStore:
             raise ValueError("Documents and metadatas must have the same length")
 
         started = time.time()
-        logger.info("Upserting single aggregated row for %s from %s input documents", doc_type, len(documents))
+        logger.info("Upserting %s chunk rows for %s", len(documents), doc_type)
 
-        incoming_docs = [doc.strip() for doc in documents if doc and doc.strip()]
-        if not incoming_docs:
+        rows_to_insert: List[Tuple[str, Dict[str, Any]]] = []
+        for doc, meta in zip(documents, metadatas):
+            cleaned_doc = (doc or "").strip()
+            if not cleaned_doc:
+                continue
+            metadata = dict(meta or {})
+            metadata.setdefault("type", doc_type)
+            metadata.setdefault("storage_mode", "chunk_row")
+            metadata.setdefault("source_file", metadata.get("file_name", ""))
+            rows_to_insert.append((cleaned_doc, metadata))
+
+        if not rows_to_insert:
             logger.warning("All provided documents were empty after cleanup for %s", doc_type)
             return
 
-        incoming_content = "\n\n".join(incoming_docs)
+        contents = [row[0] for row in rows_to_insert]
+        embeddings = self.embedder.encode(contents, normalize_embeddings=False)
 
         with self._get_connection() as conn, conn.cursor() as cur:
+            # Remove legacy single-row records for this doc type.
             cur.execute(
-                f"SELECT content, metadata FROM {self.table_name} WHERE doc_type = %s",
+                f"DELETE FROM {self.table_name} WHERE doc_type = %s AND (metadata->>'storage_mode') = 'single_row'",
                 (doc_type,),
             )
-            existing_rows = cur.fetchall()
 
-            if existing_rows:
-                existing_text_parts: List[str] = []
-                existing_sources: List[str] = []
-                existing_criteria: List[str] = []
-                existing_categories: List[str] = []
-                for existing_content, existing_meta in existing_rows:
-                    if existing_content:
-                        existing_text_parts.append(str(existing_content))
-
-                    meta_dict: Dict[str, Any] = {}
-                    if isinstance(existing_meta, dict):
-                        meta_dict = existing_meta
-                    elif isinstance(existing_meta, str):
-                        try:
-                            loaded = json.loads(existing_meta)
-                            if isinstance(loaded, dict):
-                                meta_dict = loaded
-                        except Exception:
-                            meta_dict = {}
-
-                    src_list = meta_dict.get("source_files", [])
-                    if isinstance(src_list, list):
-                        existing_sources.extend(str(x) for x in src_list if str(x).strip())
-                    src_single = str(meta_dict.get("source_file", "")).strip()
-                    if src_single:
-                        existing_sources.append(src_single)
-
-                    criterion_list = meta_dict.get("criteria", [])
-                    if isinstance(criterion_list, list):
-                        existing_criteria.extend(str(x) for x in criterion_list if str(x).strip())
-                    criterion_single = str(meta_dict.get("criterion", "")).strip()
-                    if criterion_single:
-                        existing_criteria.append(criterion_single)
-
-                    category_list = meta_dict.get("categories", [])
-                    if isinstance(category_list, list):
-                        existing_categories.extend(str(x) for x in category_list if str(x).strip())
-                    category_single = str(meta_dict.get("category", "")).strip()
-                    if category_single:
-                        existing_categories.append(category_single)
-
-                existing_combined = "\n\n".join(part.strip() for part in existing_text_parts if part and part.strip())
-                merged_content = self._merge_text(existing_combined, incoming_content)
-                existing_meta_merged = {
-                    "source_files": sorted(set(existing_sources)),
-                    "criteria": sorted(set(existing_criteria)),
-                    "categories": sorted(set(existing_categories)),
+            # Replace existing chunks for the same source files/file hashes to avoid duplicates on re-ingest.
+            file_hashes = sorted(
+                {
+                    str(meta.get("file_hash", "")).strip()
+                    for _, meta in rows_to_insert
+                    if str(meta.get("file_hash", "")).strip()
                 }
-                merged_meta = self._build_single_row_metadata(doc_type, metadatas, existing_meta_merged)
-            else:
-                merged_content = incoming_content
-                merged_meta = self._build_single_row_metadata(doc_type, metadatas, None)
+            )
+            source_files = sorted(
+                {
+                    str(meta.get("source_file", "")).strip()
+                    for _, meta in rows_to_insert
+                    if str(meta.get("source_file", "")).strip()
+                }
+            )
 
-            embedding = self.embedder.encode([merged_content], normalize_embeddings=False)[0]
-            emb_str = self._to_vector_literal(embedding)
+            if file_hashes:
+                cur.execute(
+                    f"""
+                    DELETE FROM {self.table_name}
+                    WHERE doc_type = %s
+                      AND (metadata->>'file_hash') = ANY(%s);
+                    """,
+                    (doc_type, file_hashes),
+                )
+            elif source_files:
+                cur.execute(
+                    f"""
+                    DELETE FROM {self.table_name}
+                    WHERE doc_type = %s
+                      AND (metadata->>'source_file') = ANY(%s);
+                    """,
+                    (doc_type, source_files),
+                )
 
-            # Enforce exactly one row per document type.
-            cur.execute(f"DELETE FROM {self.table_name} WHERE doc_type = %s", (doc_type,))
-            cur.execute(
+            insert_rows = []
+            for (content, metadata), embedding in zip(rows_to_insert, embeddings):
+                insert_rows.append(
+                    (
+                        doc_type,
+                        content,
+                        Json(metadata),
+                        self._to_vector_literal(embedding),
+                    )
+                )
+
+            execute_batch(
+                cur,
                 f"""
                 INSERT INTO {self.table_name} (doc_type, content, metadata, embedding)
                 VALUES (%s, %s, %s, %s::vector)
                 """,
-                (doc_type, merged_content, Json(merged_meta), emb_str),
+                insert_rows,
+                page_size=200,
             )
             conn.commit()
 
         logger.info(
-            "Upserted single %s row (chars=%s, %.2fms)",
+            "Upserted %s %s rows (%.2fms)",
+            len(rows_to_insert),
             doc_type,
-            len(merged_content),
             (time.time() - started) * 1000,
         )
 
@@ -348,8 +312,7 @@ class SupabaseVectorStore:
             cur.execute(sql, [emb_str, *params, emb_str, n_results])
             rows = cur.fetchall()
 
-            # In single-row mode, filters may not match aggregate metadata exactly.
-            # Fall back to the single best row for this doc_type.
+            # If strict filter produced no result, fallback to top chunks from the doc type.
             if not rows and (criterion_filter or category_filter):
                 cur.execute(
                     f"""
@@ -357,9 +320,9 @@ class SupabaseVectorStore:
                     FROM {self.table_name}
                     WHERE doc_type = %s
                     ORDER BY embedding <=> %s::vector
-                    LIMIT 1;
+                    LIMIT %s;
                     """,
-                    [emb_str, doc_type, emb_str],
+                    [emb_str, doc_type, emb_str, n_results],
                 )
                 rows = cur.fetchall()
 
