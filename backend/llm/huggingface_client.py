@@ -36,9 +36,10 @@ class HuggingFaceClient:
         mvsr_context: List[str],
         naac_metadata: List[Dict],
         mvsr_metadata: List[Dict],
+        memory_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         prompt = self._build_compliance_prompt(
-            user_query, naac_context, mvsr_context, naac_metadata, mvsr_metadata
+            user_query, naac_context, mvsr_context, naac_metadata, mvsr_metadata, memory_context
         )
 
         try:
@@ -91,16 +92,21 @@ class HuggingFaceClient:
         mvsr_context: List[str],
         naac_metadata: List[Dict],
         mvsr_metadata: List[Dict],
+        memory_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         context_parts = []
 
         if naac_context:
-            naac_text = naac_context[0]
-            context_parts.append(f"NAAC REQUIREMENT CONTEXT:\n{naac_text}")
+            naac_chunks = []
+            for idx, text in enumerate(naac_context[:6], start=1):
+                naac_chunks.append(f"[NAAC Chunk {idx}]\n{text}")
+            context_parts.append("NAAC REQUIREMENT CONTEXT:\n" + "\n\n".join(naac_chunks))
 
         if mvsr_context:
-            mvsr_text = mvsr_context[0]
-            context_parts.append(f"COLLEGE REPORT / EVIDENCE CONTEXT:\n{mvsr_text}")
+            mvsr_chunks = []
+            for idx, text in enumerate(mvsr_context[:8], start=1):
+                mvsr_chunks.append(f"[College Evidence Chunk {idx}]\n{text}")
+            context_parts.append("COLLEGE REPORT / EVIDENCE CONTEXT:\n" + "\n\n".join(mvsr_chunks))
 
         context_block = (
             "\n\n".join(context_parts)
@@ -114,6 +120,27 @@ class HuggingFaceClient:
         mvsr_meta_summary = ", ".join(
             [f"doc={m.get('document', 'N/A')}, category={m.get('category', 'N/A')}, year={m.get('year', 'N/A')}" for m in mvsr_metadata[:5]]
         ) or "N/A"
+
+        short_term_memories = []
+        long_term_memories = []
+        if memory_context and isinstance(memory_context, dict):
+            short_term_memories = memory_context.get("short_term", []) or []
+            long_term_memories = memory_context.get("long_term", []) or []
+
+        memory_lines = []
+        for idx, memory in enumerate(short_term_memories[-6:], start=1):
+            role = str(memory.get("role", "user"))
+            content = str(memory.get("content", "")).strip()
+            if content:
+                memory_lines.append(f"[Short-Term {idx}] ({role}) {content}")
+        for idx, memory in enumerate(long_term_memories[:4], start=1):
+            role = str(memory.get("role", "user"))
+            content = str(memory.get("content", "")).strip()
+            similarity = memory.get("similarity")
+            if content:
+                memory_lines.append(f"[Long-Term {idx}] ({role}, sim={similarity}) {content}")
+
+        memory_block = "\n".join(memory_lines) if memory_lines else "No memory context available."
 
         prompt = f"""You are a NAAC compliance audit assistant.
 
@@ -135,6 +162,9 @@ User query:
 Retrieved metadata snapshot:
 - NAAC: {naac_meta_summary}
 - College evidence: {mvsr_meta_summary}
+
+Conversation memory:
+{memory_block}
 
 Retrieved context:
 {context_block}

@@ -27,6 +27,7 @@ from ..rag.pipeline import RAGPipeline
 from ..rag.metadata_mapper import NAACMetadataMapper
 from ..db.supabase_store import SupabaseVectorStore
 from ..llm.huggingface_client import HuggingFaceClient
+from ..memory.memory_store import ConversationMemoryStore, MemoryIdentity
 from ..ingestion.ingest import DocumentIngestionPipeline
 from ..updater.auto_ingest import NAACAutoIngest
 from ..scheduler.update_scheduler import NAACUpdateScheduler
@@ -48,12 +49,16 @@ auto_ingest: Optional[NAACAutoIngest] = None
 scheduler: Optional[NAACUpdateScheduler] = None
 metadata_mapper: Optional[NAACMetadataMapper] = None
 vector_store_instance: Optional[SupabaseVectorStore] = None
+memory_store_instance: Optional[ConversationMemoryStore] = None
 
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
     query: str = Field(..., description="Natural language query about NAAC compliance")
     filters: Optional[Dict[str, Any]] = Field(None, description="Optional filters for retrieval")
     include_sources: bool = Field(True, description="Include source details in response")
+    tenant_id: Optional[str] = Field(None, description="Tenant scope for memory")
+    user_id: Optional[str] = Field(None, description="User scope for memory")
+    conversation_id: Optional[str] = Field(None, description="Conversation scope for memory")
 
 class ComplianceResponse(BaseModel):
     naac_requirement: str = Field(..., description="Relevant NAAC requirements")
@@ -126,6 +131,30 @@ app.add_middleware(
 def _ingest_markdown_docs(vector_store, data_dir: Path) -> None:
     """Ingest markdown/text documents into the vector store if empty."""
     try:
+        def split_text_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
+            cleaned = " ".join((text or "").split())
+            if not cleaned:
+                return []
+
+            if len(cleaned) <= chunk_size:
+                return [cleaned]
+
+            chunks: List[str] = []
+            start = 0
+            step = max(chunk_size - overlap, 1)
+            while start < len(cleaned):
+                end = start + chunk_size
+                chunk = cleaned[start:end].strip()
+                if chunk:
+                    chunks.append(chunk)
+                if end >= len(cleaned):
+                    break
+                start += step
+            return chunks
+
+        chunk_size = max(settings.chunk_size, 400)
+        chunk_overlap = max(min(settings.chunk_overlap, chunk_size // 2), 50)
+
         # Check if already populated
         stats = vector_store.get_collection_stats()
         naac_count = stats.get("naac_requirements_count", 0)
@@ -142,23 +171,25 @@ def _ingest_markdown_docs(vector_store, data_dir: Path) -> None:
             for f in naac_dir.glob("*"):
                 if f.suffix.lower() in {".md", ".txt"}:
                     text = f.read_text(encoding="utf-8", errors="ignore")
-                    cleaned_text = " ".join(text.split())
-                    if not cleaned_text:
-                        continue
                     criterion = "1"
                     for c in ["1","2","3","4","5","6","7"]:
                         if f"criterion_{c}" in f.name.lower() or f"criteria_{c}" in f.name.lower():
                             criterion = c; break
-                    naac_docs.append(cleaned_text)
-                    naac_metas.append({
-                        "type": "requirement", "criterion": criterion,
-                        "version": "2025", "source_file": f.name,
-                        "indicator": f"{criterion}.1"
-                    })
+                    for chunk_idx, chunk_text in enumerate(split_text_chunks(text, chunk_size, chunk_overlap)):
+                        naac_docs.append(chunk_text)
+                        naac_metas.append({
+                            "type": "requirement",
+                            "criterion": criterion,
+                            "version": "2025",
+                            "source_file": f.name,
+                            "indicator": f"{criterion}.1",
+                            "chunk_index": chunk_idx,
+                            "storage_mode": "chunk_row",
+                        })
 
         if naac_docs:
             vector_store.add_naac_documents(naac_docs, naac_metas)
-            logger.info("Ingested startup NAAC corpus as one aggregated row from %s files", len(naac_docs))
+            logger.info("Ingested startup NAAC corpus as %s chunk rows", len(naac_docs))
 
         # Ingest MVSR SSR PDF from mvsr_evidence/reports/
         ssr_dir = data_dir / "mvsr_evidence" / "reports"
@@ -172,16 +203,18 @@ def _ingest_markdown_docs(vector_store, data_dir: Path) -> None:
                     if not text or not text.strip():
                         logger.warning(f"No text extracted from SSR PDF: {f.name}")
                         continue
-                    cleaned_text = " ".join(text.split())
-                    if not cleaned_text:
-                        continue
-                    mvsr_docs.append(cleaned_text)
-                    mvsr_metas.append({
-                        "type": "evidence", "criterion": "1",
-                        "document": f.stem.replace("-", " ").replace("_", " "),
-                        "year": 2019, "category": "ssr",
-                        "source_file": f.name
-                    })
+                    for chunk_idx, chunk_text in enumerate(split_text_chunks(text, chunk_size, chunk_overlap)):
+                        mvsr_docs.append(chunk_text)
+                        mvsr_metas.append({
+                            "type": "evidence",
+                            "criterion": "1",
+                            "document": f.stem.replace("-", " ").replace("_", " "),
+                            "year": 2019,
+                            "category": "ssr",
+                            "source_file": f.name,
+                            "chunk_index": chunk_idx,
+                            "storage_mode": "chunk_row",
+                        })
                     logger.info("Prepared MVSR SSR PDF for aggregated ingest: %s", f.name)
                     ssr_ingested = True
                 except Exception as pdf_err:
@@ -196,26 +229,28 @@ def _ingest_markdown_docs(vector_store, data_dir: Path) -> None:
                 for f in mvsr_dir.glob("*"):
                     if f.suffix.lower() in {".md", ".txt"}:
                         text = f.read_text(encoding="utf-8", errors="ignore")
-                        cleaned_text = " ".join(text.split())
-                        if not cleaned_text:
-                            continue
                         category = "general"
                         if "research" in f.name.lower():
                             category = "research"
                         elif "academic" in f.name.lower():
                             category = "academic"
-                        mvsr_docs.append(cleaned_text)
-                        mvsr_metas.append({
-                            "type": "evidence", "criterion": "1",
-                            "document": f.stem.replace("_", " "),
-                            "year": 2024, "category": category,
-                            "source_file": f.name
-                        })
+                        for chunk_idx, chunk_text in enumerate(split_text_chunks(text, chunk_size, chunk_overlap)):
+                            mvsr_docs.append(chunk_text)
+                            mvsr_metas.append({
+                                "type": "evidence",
+                                "criterion": "1",
+                                "document": f.stem.replace("_", " "),
+                                "year": 2024,
+                                "category": category,
+                                "source_file": f.name,
+                                "chunk_index": chunk_idx,
+                                "storage_mode": "chunk_row",
+                            })
                         logger.info("Prepared MVSR fallback file for aggregated ingest: %s", f.name)
 
         if mvsr_docs:
             vector_store.add_mvsr_documents(mvsr_docs, mvsr_metas)
-            logger.info("Ingested startup MVSR corpus as one aggregated row from %s files", len(mvsr_docs))
+            logger.info("Ingested startup MVSR corpus as %s chunk rows", len(mvsr_docs))
 
         logger.info("Startup document ingestion complete.")
     except Exception as e:
@@ -224,7 +259,7 @@ def _ingest_markdown_docs(vector_store, data_dir: Path) -> None:
 
 async def initialize_system():
     """Initialize all system components"""
-    global rag_pipeline, auto_ingest, scheduler, metadata_mapper, vector_store_instance
+    global rag_pipeline, auto_ingest, scheduler, metadata_mapper, vector_store_instance, memory_store_instance
     
     try:
         # Initialize Supabase vector store
@@ -238,8 +273,23 @@ async def initialize_system():
             embedding_dim=settings.embedding_dim,
             embedding_device=settings.embedding_device,
         )
-        vector_store.consolidate_single_row_mode()
         vector_store_instance = vector_store
+
+        if settings.memory_enabled:
+            memory_store = ConversationMemoryStore(
+                db_url=settings.supabase_db_url,
+                embedding_model=settings.embedding_model,
+                embedding_dim=settings.embedding_dim,
+                embedding_device=settings.embedding_device,
+                short_ttl_days=settings.memory_short_ttl_days,
+                long_ttl_days=settings.memory_long_ttl_days,
+                short_limit=settings.memory_short_limit,
+                long_top_k=settings.memory_long_top_k,
+            )
+            memory_store.initialize_schema()
+            memory_store_instance = memory_store
+        else:
+            memory_store_instance = None
         
         # Initialize Hugging Face client
         llm_client = HuggingFaceClient(
@@ -249,7 +299,11 @@ async def initialize_system():
         )
         
         # Initialize ingestion pipeline
-        ingestion_pipeline = DocumentIngestionPipeline(vector_store=vector_store)
+        ingestion_pipeline = DocumentIngestionPipeline(
+            vector_store=vector_store,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+        )
         
         # Initialize RAG pipeline
         rag_pipeline = RAGPipeline(
@@ -331,6 +385,30 @@ def get_vector_store() -> SupabaseVectorStore:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
     return vector_store_instance
 
+
+def get_memory_store() -> Optional[ConversationMemoryStore]:
+    """Dependency to get memory store (optional)."""
+    return memory_store_instance
+
+
+def _build_memory_identity(request: QueryRequest) -> MemoryIdentity:
+    return MemoryIdentity(
+        tenant_id=(request.tenant_id or "default_tenant").strip() or "default_tenant",
+        user_id=(request.user_id or "default_user").strip() or "default_user",
+        conversation_id=(request.conversation_id or "default_conversation").strip() or "default_conversation",
+    )
+
+
+def _build_assistant_memory_text(response: Dict[str, Any]) -> str:
+    parts = []
+    if response.get("compliance_analysis"):
+        parts.append(str(response["compliance_analysis"]).strip())
+    if response.get("recommendations"):
+        parts.append(f"Recommendations: {str(response['recommendations']).strip()}")
+    if response.get("status"):
+        parts.append(f"Status: {str(response['status']).strip()}")
+    return "\n\n".join([p for p in parts if p])
+
 # API Endpoints
 
 @api_router.get("/health")
@@ -344,7 +422,8 @@ async def health_check():
                 "rag_pipeline": rag_pipeline is not None,
                 "auto_ingest": auto_ingest is not None,
                 "scheduler": scheduler is not None and scheduler.scheduler.running if scheduler else False,
-                "metadata_mapper": metadata_mapper is not None
+                "metadata_mapper": metadata_mapper is not None,
+                "memory_layer": memory_store_instance is not None,
             }
         }
         
@@ -354,6 +433,12 @@ async def health_check():
             health_status["pipeline_health"] = pipeline_health
             
             if pipeline_health.get("overall_status") != "healthy":
+                health_status["status"] = "degraded"
+
+        if memory_store_instance:
+            memory_health = memory_store_instance.get_health()
+            health_status["memory_health"] = memory_health
+            if not memory_health.get("ok", False):
                 health_status["status"] = "degraded"
         
         return health_status
@@ -370,7 +455,11 @@ async def health_check():
         )
 
 @api_router.post("/query", response_model=ComplianceResponse)
-async def query_compliance(request: QueryRequest, pipeline: RAGPipeline = Depends(get_rag_pipeline)):
+async def query_compliance(
+    request: QueryRequest,
+    pipeline: RAGPipeline = Depends(get_rag_pipeline),
+    memory_store: Optional[ConversationMemoryStore] = Depends(get_memory_store),
+):
     """
     Query the NAAC compliance system
     
@@ -379,13 +468,49 @@ async def query_compliance(request: QueryRequest, pipeline: RAGPipeline = Depend
     try:
         logger.info(f"Processing query: {request.query[:100]}...")
         
+        memory_context: Optional[Dict[str, Any]] = None
+        memory_identity: Optional[MemoryIdentity] = None
+        if memory_store:
+            try:
+                memory_store.cleanup_expired()
+                memory_identity = _build_memory_identity(request)
+                memory_context = memory_store.get_context(memory_identity, request.query)
+            except Exception as memory_err:
+                logger.warning(f"Memory fetch failed; continuing without memory context: {memory_err}")
+                memory_context = None
+
         # Process query through RAG pipeline (run sync function in thread to avoid blocking)
         import asyncio
         response = await asyncio.to_thread(
             pipeline.process_query,
             request.query,
-            request.filters
+            request.filters,
+            memory_context,
         )
+
+        if memory_store and memory_identity:
+            try:
+                assistant_text = _build_assistant_memory_text(response)
+                memory_store.add_messages(
+                    memory_identity,
+                    [
+                        {
+                            "role": "user",
+                            "content": request.query,
+                            "metadata": {"source": "query_endpoint"},
+                        },
+                        {
+                            "role": "assistant",
+                            "content": assistant_text,
+                            "metadata": {
+                                "status": response.get("status", "Unknown"),
+                                "source": "query_endpoint",
+                            },
+                        },
+                    ],
+                )
+            except Exception as memory_write_err:
+                logger.warning(f"Memory write failed; response already generated: {memory_write_err}")
         
         # Format response
         compliance_response = ComplianceResponse(

@@ -69,9 +69,8 @@ class ComplianceRetriever:
         Returns:
             Tuple of (naac_results, mvsr_results)
         """
-        # Single-row mode: one NAAC row and one MVSR row are enough.
-        k_naac = 1
-        k_mvsr = 1
+        k_naac = k_naac or self.default_k_naac
+        k_mvsr = k_mvsr or self.default_k_mvsr
         
         logger.info(f"Retrieving compliance context for query: '{query[:100]}...'")
         
@@ -105,12 +104,12 @@ class ComplianceRetriever:
 
         This is useful for compliance checking where exact phrases/conditions matter.
         """
-        # Single-row mode: hybrid reranking is not meaningful with one row per type.
-        k_naac = 1
-        k_mvsr = 1
+        k_naac = k_naac or self.default_k_naac
+        k_mvsr = k_mvsr or self.default_k_mvsr
+        candidate_multiplier = max(int(candidate_multiplier or 1), 1)
 
-        candidate_k_naac = 1
-        candidate_k_mvsr = 1
+        candidate_k_naac = max(k_naac * candidate_multiplier, k_naac)
+        candidate_k_mvsr = max(k_mvsr * candidate_multiplier, k_mvsr)
 
         logger.info(
             f"Hybrid retrieval for query: '{query[:100]}...' (dense={dense_weight:.2f}, lexical={lexical_weight:.2f})"

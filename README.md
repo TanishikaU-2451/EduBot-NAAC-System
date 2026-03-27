@@ -15,13 +15,13 @@ This is **NOT a generic chatbot** but a specialized compliance intelligence syst
 ## 🏗️ Architecture
 
 ### Backend Components
-- **FastAPI REST API**: Exposes RAG pipeline through HTTP endpoints
-- **ChromaDB Vector Store**: Separate collections for NAAC requirements and MVSR evidence
-- **Ollama LLM Integration**: Local Llama3 model for response generation
-- **RAG Pipeline**: Retrieval-Augmented Generation with metadata mapping
-- **Auto-Update Engine**: Web scraping, document detection, and automatic ingestion
-- **Scheduler System**: APScheduler with persistent job management
-- **Document Processing**: PDF extraction with intelligent chunking
+- **FastAPI REST API**: Orchestrates ingestion, retrieval, scheduling, and monitoring through HTTP endpoints
+- **Supabase PostgreSQL + pgvector store**: Maintains NAAC requirements and MVSR evidence as aggregated vectors (see `db_schema.txt`) to support hybrid similarity search
+- **HuggingFace Inference API**: Hosts the Llama3-style conversational model that generates structured compliance analysis
+- **RAG Pipeline**: Combines Supabase retrieval with HuggingFace generation plus metadata mapping and scoring
+- **Auto-Update Engine**: Web scraping, document detection, and scheduled ingestion of new NAAC releases
+- **Scheduler System**: APScheduler backed by a SQLite job store with endpoints for pause/resume/manage
+- **Document Processing**: PDF/text chunking, cleaning, and single-row consolidation before vector upsert
 
 ### Frontend Components  
 - **React TypeScript App**: Modern Material-UI interface
@@ -40,30 +40,23 @@ This is **NOT a generic chatbot** but a specialized compliance intelligence syst
 - **2GB+ disk space** for documents and embeddings
 
 ### Required Services
-- **Ollama**: Local LLM server with Llama3 model
+- **Supabase**: PostgreSQL project with the `vector` extension enabled and a `chunks` table that matches `db_schema.txt`. Set `SUPABASE_DB_URL` and `SUPABASE_TABLE` to connect.
+- **HuggingFace Inference API**: Provides the LLM endpoint (default `meta-llama/Meta-Llama-3.1-8B-Instruct`). Acquire an `HF_API_TOKEN` and keep it secret.
 
 ## 🚀 Quick Start Guide
 
-### 1. Install Ollama and Llama3
+### 1. Provision vector storage and LLM access
 
-```bash
-# Install Ollama (Windows)
-# Download from: https://ollama.ai/download/windows
-# Or use winget:
-winget install Ollama.Ollama
-
-# Install Ollama (macOS)
-brew install ollama
-
-# Install Ollama (Linux)
-curl -fsSL https://ollama.ai/install.sh | sh
-
-# Pull Llama3 model (this may take several minutes)
-ollama pull llama3
-
-# Verify Ollama is running (should start automatically)
-ollama list
-```
+1. **Supabase vector store**
+   - Create or reuse a Supabase project, enable the `vector` extension, and run the SQL in `db_schema.txt` to create `public.chunks`.
+   - Copy the generated connection string (should include `postgresql://` and your credentials) and set it as `SUPABASE_DB_URL`.
+   - Confirm `SUPABASE_TABLE` exists (default: `chunks`) and contains at least one row after a startup ingest.
+2. **HuggingFace Inference**
+   - Sign up at HuggingFace, navigate to your account settings, and create an **Inference API token**.
+   - Set `HF_API_TOKEN` in `.env` and ensure `HF_MODEL` points to your preferred model (default `meta-llama/Meta-Llama-3.1-8B-Instruct`).
+3. **Verify connectivity**
+   - Supabase: run a simple `psql` query or use the Supabase UI to SELECT from `public.chunks`.
+   - HuggingFace: `curl -H "Authorization: Bearer $HF_API_TOKEN" https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3.1-8B-Instruct | jq .`
 
 ### 2. Clone and Setup Backend
 
@@ -116,14 +109,20 @@ DEBUG=false
 HOST=0.0.0.0
 PORT=8000
 
-# Database Configuration
-CHROMA_DB_PATH=./chroma_db
+# Vector Backend
+VECTOR_BACKEND=supabase
+SUPABASE_DB_URL=postgresql://user:password@db.supabase.co:5432/postgres
+SUPABASE_TABLE=chunks
 JOB_STORE_URL=sqlite:///jobs.sqlite
 
-# Ollama Configuration
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=llama3
-OLLAMA_TIMEOUT=120
+# HuggingFace Inference
+HF_MODEL=meta-llama/Meta-Llama-3.1-8B-Instruct
+HF_API_TOKEN=hf_xxx-your-token-xxx
+HF_TIMEOUT=120
+
+# Embedding Configuration
+EMBEDDING_MODEL=all-MiniLM-L6-v2
+EMBEDDING_DEVICE=cpu
 
 # Document Processing
 DATA_DIRECTORY=./data
@@ -146,7 +145,7 @@ CORS_ORIGINS=["http://localhost:3000"]
 ```bash
 # Create required directories
 mkdir -p data/naac_documents data/mvsr_documents
-mkdir -p cache uploads chroma_db
+mkdir -p cache uploads
 ```
 
 ### 6. Start the System
@@ -175,9 +174,10 @@ npm start
 
 ### 7. Verify Installation
 
-1. **Check Ollama**: Visit `http://localhost:11434` (should show Ollama API)
-2. **Check Backend**: Visit `http://localhost:8000/health` (should show system health)
-3. **Check Frontend**: Visit `http://localhost:3000` (should show chat interface)
+1. **Check Supabase**: Use the Supabase dashboard (or a `SELECT` query) to confirm `public.chunks` exists and contains at least one document after ingestion.
+2. **Check HuggingFace**: Run `curl -H "Authorization: Bearer $HF_API_TOKEN" https://api-inference.huggingface.co/models/$HF_MODEL | jq .model_id` to ensure the token/model pair responds.
+3. **Check Backend**: Visit `http://localhost:8000/health` (should show system health)
+4. **Check Frontend**: Visit `http://localhost:3000` (should show chat interface)
 
 ## 📚 Initial Setup and Usage
 
@@ -286,26 +286,24 @@ tail -f backend/logs/updater.log
 
 ### Common Issues
 
-#### 1. Ollama Connection Failed
+#### 1. Supabase connection failed
 ```bash
-# Check if Ollama is running
-curl http://localhost:11434/api/tags
+# Confirm SUPABASE_DB_URL is reachable
+psql "$SUPABASE_DB_URL" -c "SELECT 1;"
 
-# Restart Ollama service
-# Windows: Restart from Services or Task Manager
-# macOS/Linux: 
-sudo systemctl restart ollama
-# or
-ollama serve
+# Ensure the vector extension/table exist (see db_schema.txt)
+psql "$SUPABASE_DB_URL" -c "SELECT tablename FROM pg_tables WHERE tablename='chunks';"
+
+# Check for vector index (vector extension must be installed)
+psql "$SUPABASE_DB_URL" -c "SELECT indexname FROM pg_indexes WHERE tablename='chunks';"
 ```
 
-#### 2. ChromaDB Initialization Error
+#### 2. HuggingFace Inference error
 ```bash
-# Reset ChromaDB (will lose existing data)
-rm -rf chroma_db/
-mkdir chroma_db
+# Verify token + model combination
+curl -H "Authorization: Bearer $HF_API_TOKEN" https://api-inference.huggingface.co/models/$HF_MODEL
 
-# Restart backend to recreate database
+# If you hit rate limits, try `HF_TIMEOUT=300` or upgrade your plan
 ```
 
 #### 3. Package Installation Issues
@@ -314,7 +312,7 @@ mkdir chroma_db
 pip install --upgrade pip setuptools wheel
 
 # Install packages one by one to identify issues
-pip install fastapi uvicorn chromadb sentence-transformers
+pip install fastapi uvicorn psycopg2-binary sentence-transformers huggingface-hub
 
 # For specific package conflicts:
 pip install --no-deps <package-name>
@@ -345,9 +343,9 @@ lsof -i :8000  # macOS/Linux
 ## 📈 Performance Optimization
 
 ### Database Optimization
-- Regular ChromaDB cleanup and optimization
-- Index rebuilding for better query performance
-- Vector dimension reduction for faster similarity search
+- Monitor Supabase `chunks` table health, vacuum indexes, and keep `vector` extension statistics up to date
+- Rebuild or reindex pgvector indexes when schema changes or retrieval latency spikes
+- Trim older archived metadata or prune embeddings if storage grows above expectations
 
 ### Document Processing
 - Batch processing for large document uploads  
@@ -421,3 +419,4 @@ This project is licensed under the MIT License. See LICENSE file for details.
 ---
 
 **Built with ❤️ for MVSR Engineering College NAAC Accreditation**
+

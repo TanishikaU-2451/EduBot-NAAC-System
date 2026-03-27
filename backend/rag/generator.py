@@ -61,6 +61,10 @@ class ComplianceGenerator:
         naac_context, mvsr_context = self._truncate_context(
             naac_context, mvsr_context
         )
+
+        memory_context = {}
+        if context.additional_context and isinstance(context.additional_context, dict):
+            memory_context = context.additional_context.get("memory_context", {}) or {}
         
         # Generate response using configured LLM client
         response = self.llm_client.generate_compliance_response(
@@ -68,7 +72,8 @@ class ComplianceGenerator:
             naac_context=naac_context,
             mvsr_context=mvsr_context,
             naac_metadata=naac_metadata,
-            mvsr_metadata=mvsr_metadata
+            mvsr_metadata=mvsr_metadata,
+            memory_context=memory_context,
         )
         
         # Enhance response with additional analysis
@@ -108,6 +113,10 @@ class ComplianceGenerator:
                     'indicator': meta.get('indicator', 'N/A'),
                     'version': meta.get('version', 'N/A'),
                     'document_title': meta.get('document_title', 'NAAC Document'),
+                    'source_file': meta.get('source_file', meta.get('file_name', 'N/A')),
+                    'chunk_index': meta.get('chunk_index', 'N/A'),
+                    'start_page': meta.get('start_page', 'N/A'),
+                    'end_page': meta.get('end_page', 'N/A'),
                     'similarity_score': round(1 - distance, 3)
                 }
                 metadatas.append(prepared_meta)
@@ -144,6 +153,10 @@ class ComplianceGenerator:
                     'year': meta.get('year', 'N/A'),
                     'category': meta.get('category', 'N/A'),
                     'mapped_criterion': meta.get('criterion', 'N/A'),
+                    'source_file': meta.get('source_file', meta.get('file_name', 'N/A')),
+                    'chunk_index': meta.get('chunk_index', 'N/A'),
+                    'start_page': meta.get('start_page', 'N/A'),
+                    'end_page': meta.get('end_page', 'N/A'),
                     'similarity_score': round(1 - distance, 3)
                 }
                 metadatas.append(prepared_meta)
@@ -311,13 +324,17 @@ class ComplianceGenerator:
                 source.update({
                     'criterion': meta.get('criterion', 'N/A'),
                     'indicator': meta.get('indicator', 'N/A'),
-                    'document': meta.get('document_title', 'NAAC Document')
+                    'document': meta.get('document_title', 'NAAC Document'),
+                    'source_file': meta.get('source_file', meta.get('file_name', 'N/A')),
+                    'chunk_index': meta.get('chunk_index', 'N/A')
                 })
             else:  # mvsr
                 source.update({
                     'document': meta.get('document_title', meta.get('document', 'MVSR Document')),
                     'category': meta.get('category', 'N/A'),
-                    'year': meta.get('year', 'N/A')
+                    'year': meta.get('year', 'N/A'),
+                    'source_file': meta.get('source_file', meta.get('file_name', 'N/A')),
+                    'chunk_index': meta.get('chunk_index', 'N/A')
                 })
             
             sources.append(source)
