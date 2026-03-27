@@ -359,12 +359,30 @@ class DocumentIngestionPipeline:
 
             documents, metadatas = self._prepare_chunk_rows(chunks, metadata.__dict__.copy())
 
+            logger.info(
+                "[DB-WRITE] About to write %d chunks for '%s' (type=%s) to vector store",
+                len(documents),
+                path_obj.name,
+                document_type,
+            )
+
             if document_type == "naac_requirement":
                 self.vector_store.add_naac_documents(documents, metadatas)
             elif document_type == "mvsr_evidence":
                 self.vector_store.add_mvsr_documents(documents, metadatas)
             else:
                 raise ValueError(f"Invalid document type: {document_type}")
+
+            # Confirm with stats after write
+            try:
+                stats = self.vector_store.get_collection_stats()
+                logger.info(
+                    "[DB-WRITE] ✓ Write complete. Vector store now has %s NAAC docs, %s MVSR docs.",
+                    stats.get("naac_requirements_count", "?"),
+                    stats.get("mvsr_evidence_count", "?"),
+                )
+            except Exception as stats_err:
+                logger.warning("[DB-WRITE] Could not fetch post-write stats: %s", stats_err)
 
             self._log_ingestion(path_obj, document_type, len(chunks))
             result = {
@@ -379,7 +397,7 @@ class DocumentIngestionPipeline:
             logger.info("Successfully ingested %s as %s chunk rows", path_obj.name, len(chunks))
             return result
         except Exception as e:
-            logger.error("Failed to ingest document %s: %s", path_obj.name, e)
+            logger.error("Failed to ingest document %s: %s", path_obj.name, e, exc_info=True)
             return {
                 "file": path_obj.name,
                 "status": "failed",

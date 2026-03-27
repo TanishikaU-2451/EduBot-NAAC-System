@@ -78,5 +78,21 @@
     "document_type": "naac_requirement",
     "chunk_count": 2,
     "timestamp": "2026-03-27T13:55:05.414101"
+  },
+  {
+    "file_path": "C:\\Users\\bhoom\\OneDrive\\Desktop\\projects\\major_project\\EduBot-NAAC-System\\uploads\\naac_requirement_ff38622582fd46a19594ffd514be00d0_Autonomous_College_benchmarks_15-12-2022.pdf",
+    "file_name": "naac_requirement_ff38622582fd46a19594ffd514be00d0_Autonomous_College_benchmarks_15-12-2022.pdf",
+    "file_hash": "065a23bd8a48e700",
+    "document_type": "naac_requirement",
+    "chunk_count": 140,
+    "timestamp": "2026-03-27T21:08:49.306695"
+  },
+  {
+    "file_path": "C:\\Users\\bhoom\\OneDrive\\Desktop\\projects\\major_project\\EduBot-NAAC-System\\uploads\\mvsr_evidence_396a588d15e94093b4654b2afc7f0fbb_MVSR_Strategic_Plan_2023-28.pdf",
+    "file_name": "mvsr_evidence_396a588d15e94093b4654b2afc7f0fbb_MVSR_Strategic_Plan_2023-28.pdf",
+    "file_hash": "5f0e484762ccc26e",
+    "document_type": "mvsr_evidence",
+    "chunk_count": 874,
+    "timestamp": "2026-03-27T21:09:12.075795"
   }
 ]

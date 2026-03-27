@@ -19,6 +19,7 @@ class VectorStore(Protocol):
 from ..llm.huggingface_client import HuggingFaceClient
 from .retriever import ComplianceRetriever, RetrievalResult
 from .generator import ComplianceGenerator, GenerationContext
+from .reranker import ComplianceReranker, RerankerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,17 @@ class RAGPipeline:
             llm_client=llm_client,
             max_context_length=retrieval_config.get('max_context_length', 12000)
         )
-        
+
+        # Initialize cross-encoder reranker (sits between retriever and generator)
+        reranker_config = RerankerConfig(
+            enabled=retrieval_config.get('reranker_enabled', True),
+            model_name=retrieval_config.get(
+                'reranker_model', 'cross-encoder/ms-marco-MiniLM-L-6-v2'
+            ),
+            device=retrieval_config.get('reranker_device', 'cpu'),
+        )
+        self.reranker = ComplianceReranker(reranker_config)
+
         # Query processing patterns
         self.query_patterns = {
             'criterion_patterns': [
@@ -126,7 +137,13 @@ class RAGPipeline:
             # Step 3: Retrieve relevant context
             naac_results, mvsr_results = self._retrieve_context(query_context)
 
-            # Step 4: Generate response
+            # Step 4: Cross-encoder rerank — re-scores with joint query-doc attention
+            if self.reranker.enabled:
+                logger.info("Applying cross-encoder reranking to retrieved candidates.")
+                naac_results = self.reranker.rerank(user_query, naac_results)
+                mvsr_results = self.reranker.rerank(user_query, mvsr_results)
+
+            # Step 5: Generate response
             generation_context = GenerationContext(
                 user_query=user_query,
                 naac_results=naac_results,
@@ -139,12 +156,13 @@ class RAGPipeline:
 
             response = self.generator.generate_compliance_response(generation_context)
 
-            # Step 5: Add pipeline metadata
+            # Step 6: Add pipeline metadata
             processing_time = time.time() - start_time
             response['pipeline_metadata'] = {
                 'processing_time_seconds': round(processing_time, 2),
                 'query_type': query_context.query_type,
                 'filters_applied': query_context.suggested_filters,
+                'reranker_applied': self.reranker.enabled,
                 'retrieval_stats': {
                     'naac_documents': len(naac_results.documents),
                     'mvsr_documents': len(mvsr_results.documents)
@@ -453,7 +471,13 @@ class RAGPipeline:
                 'error': str(e)
             }
             health_status['overall_status'] = 'degraded'
-        
+
+        # Reranker health
+        reranker_health = self.reranker.get_health()
+        health_status['reranker'] = reranker_health
+        if reranker_health['enabled'] and reranker_health['status'] == 'error':
+            health_status['overall_status'] = 'degraded'
+
         return health_status
     
     def get_pipeline_stats(self) -> Dict[str, Any]:

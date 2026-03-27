@@ -40,6 +40,8 @@ from ..ingestion.ingest import DocumentIngestionPipeline
 from ..updater.auto_ingest import NAACAutoIngest
 from ..scheduler.update_scheduler import NAACUpdateScheduler
 from ..config.settings import get_settings
+from ..auth.auth import authenticate, validate_token, logout, get_session_info
+
 
 # Get application settings
 settings = get_settings()
@@ -110,6 +112,18 @@ class UploadResponse(BaseModel):
 
 class StagedUploadDeleteRequest(BaseModel):
     stored_path: str = Field(..., description="Server-side staged upload path to remove")
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., description="Username")
+    password: str = Field(..., description="Password")
+
+class LoginResponse(BaseModel):
+    token: str = Field(..., description="Session token")
+    username: str = Field(..., description="Authenticated username")
+    expires_at: str = Field(..., description="Token expiry (UTC ISO)")
+    message: str = Field(..., description="Login status message")
+
+
 
 # Lifespan management
 @asynccontextmanager
@@ -363,6 +377,10 @@ async def initialize_system():
                 "dense_weight": settings.retrieval_dense_weight,
                 "lexical_weight": settings.retrieval_lexical_weight,
                 "candidate_multiplier": settings.retrieval_candidate_multiplier,
+                # Cross-encoder reranker
+                "reranker_enabled": settings.reranker_enabled,
+                "reranker_model": settings.reranker_model,
+                "reranker_device": settings.reranker_device,
             },
         )
         
@@ -595,15 +613,23 @@ async def ingest_documents(
                 ingestion_pipeline = auto_ingest_system.ingestion_pipeline
                 
                 results = []
-                for file_path in request.file_paths:
-                    if not Path(file_path).exists():
+                for raw_path in request.file_paths:
+                    # Resolve relative paths against project root so both
+                    # old relative "uploads/..." and new absolute paths work
+                    resolved = Path(raw_path)
+                    if not resolved.is_absolute():
+                        resolved = (settings.get_uploads_path().parent / raw_path).resolve()
+                    file_path = str(resolved)
+                    if not resolved.exists():
+                        logger.warning(f"Ingest: file not found at {file_path}")
                         results.append({
                             "file": file_path,
                             "status": "failed",
-                            "error": "File not found"
+                            "error": f"File not found: {file_path}"
                         })
                         continue
                     
+                    logger.info(f"Ingest: processing {file_path} as {request.document_type}")
                     result = ingestion_pipeline.ingest_single_document(
                         file_path=file_path,
                         document_type=request.document_type,
@@ -934,7 +960,7 @@ async def upload_document(
             message="File uploaded. Click Upload to start chunking and store it in the database.",
             filename=original_filename,
             stored_filename=stored_filename,
-            stored_path=str(file_path),
+            stored_path=str(file_path.resolve()),  # Always return absolute path
             document_type=document_type,
             file_size=len(content),
             timestamp=datetime.now().isoformat(),
@@ -972,6 +998,43 @@ async def delete_staged_upload(request: StagedUploadDeleteRequest):
         logger.error(f"Failed to delete staged upload: {e}")
         raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
 
+
+# ─── Auth Endpoints ────────────────────────────────────────────────────────
+
+@api_router.post("/auth/login", response_model=LoginResponse)
+async def login(request: LoginRequest):
+    """
+    Authenticate with username + password.\n
+    Demo credentials: admin / naac2025 | faculty / mvsr@faculty | demo / demo1234
+    """
+    token = authenticate(request.username, request.password)
+    if token is None:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    info = get_session_info(token)
+    return LoginResponse(
+        token=token,
+        username=info["username"],
+        expires_at=info["expires_at"],
+        message="Login successful",
+    )
+
+@api_router.post("/auth/logout")
+async def logout_endpoint(token: str = None):
+    """Invalidate a session token."""
+    if token:
+        logout(token)
+    return {"status": "ok", "message": "Logged out"}
+
+@api_router.get("/auth/me")
+async def me(token: str = None):
+    """Return session info for a valid token (used by frontend to rehydrate auth state)."""
+    if not token:
+        raise HTTPException(status_code=401, detail="No token provided")
+    info = get_session_info(token)
+    if info is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return info
+
 # Expose key endpoints without the /api prefix for local probes and misconfigured proxies
 app.add_api_route("/health", health_check, methods=["GET"])
 app.add_api_route("/stats", get_system_statistics, methods=["GET"])
@@ -980,6 +1043,10 @@ app.add_api_route("/query", query_compliance, methods=["POST"])
 app.add_api_route("/db/health", get_db_health, methods=["GET"])
 app.add_api_route("/upload", upload_document, methods=["POST"])
 app.add_api_route("/upload", delete_staged_upload, methods=["DELETE"])
+app.add_api_route("/ingest", ingest_documents, methods=["POST"])
+app.add_api_route("/auth/login", login, methods=["POST"])
+app.add_api_route("/auth/logout", logout_endpoint, methods=["POST"])
+app.add_api_route("/auth/me", me, methods=["GET"])
 
 # Include the API router in the main app
 app.include_router(api_router)

@@ -826,3 +826,43 @@ body {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* --- Sidebar User / Logout --- */
+
+.sidebar-user {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.sidebar-user-name {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--warm-brown);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.logout-btn {
+  border: 1.5px solid rgba(63, 53, 44, 0.22);
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: var(--radius-pill);
+  padding: var(--space-8) var(--space-16);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--warm-brown);
+  font-family: inherit;
+  transition: background 200ms ease, border-color 200ms ease, transform 200ms ease;
+  text-align: center;
+}
+
+.logout-btn:hover {
+  background: rgba(214, 108, 92, 0.12);
+  border-color: rgba(214, 108, 92, 0.4);
+  color: #c04f3b;
+  transform: translateY(-1px);
+}

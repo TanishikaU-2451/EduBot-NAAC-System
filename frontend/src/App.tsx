@@ -63,7 +63,7 @@ const formatFileSize = (size: number) => {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
-const App = () => {
+const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: () => void }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: createId(),
@@ -416,6 +416,14 @@ const App = () => {
         <div className="sidebar-status">
           <p>System status</p>
           <span className={`status-pill status-${systemHealth}`}>{healthLabel}</span>
+        </div>
+        <div className="sidebar-user">
+          <p className="sidebar-user-name">👤 {username}</p>
+          {onLogout && (
+            <button type="button" className="logout-btn" onClick={onLogout}>
+              Sign out
+            </button>
+          )}
         </div>
       </aside>
 

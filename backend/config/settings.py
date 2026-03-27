@@ -60,7 +60,14 @@ class Settings(BaseSettings):
     retrieval_dense_weight: float = Field(0.65, env="RETRIEVAL_DENSE_WEIGHT")
     retrieval_lexical_weight: float = Field(0.35, env="RETRIEVAL_LEXICAL_WEIGHT")
     retrieval_candidate_multiplier: int = Field(4, env="RETRIEVAL_CANDIDATE_MULTIPLIER")
-    
+
+    # Reranker settings (cross-encoder, applied after hybrid retrieval)
+    reranker_enabled: bool = Field(True, env="RERANKER_ENABLED")
+    reranker_model: str = Field(
+        "cross-encoder/ms-marco-MiniLM-L-6-v2", env="RERANKER_MODEL"
+    )
+    reranker_device: str = Field("cpu", env="RERANKER_DEVICE")
+
     # CORS settings
     cors_origins: List[str] = Field(["*"], env="CORS_ORIGINS")
     cors_allow_credentials: bool = Field(True, env="CORS_ALLOW_CREDENTIALS")
