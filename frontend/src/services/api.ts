@@ -102,6 +102,13 @@ class ApiService {
     return response.data
   }
 
+  async deleteStagedUpload(storedPath: string): Promise<any> {
+    const response = await this.api.delete('/upload', {
+      data: { stored_path: storedPath },
+    })
+    return response.data
+  }
+
   // Update endpoints
   async forceUpdate(request: UpdateRequest): Promise<any> {
     const response = await this.api.post('/force-update', request)

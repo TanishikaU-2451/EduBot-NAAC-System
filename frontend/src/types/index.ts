@@ -119,9 +119,11 @@ export interface UploadRequest {
 }
 
 export interface UploadResponse {
-  status: 'accepted' | 'failed'
+  status: 'accepted' | 'failed' | 'staged'
   message: string
   filename?: string
+  stored_filename?: string
+  stored_path?: string
   document_type?: string
   file_size?: number
   timestamp: string

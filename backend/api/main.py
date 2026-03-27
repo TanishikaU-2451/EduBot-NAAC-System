@@ -15,6 +15,7 @@ from pathlib import Path
 import os
 import io
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 try:
     from pdfminer.high_level import extract_text as pdf_extract_text
@@ -55,12 +56,8 @@ rag_pipeline: Optional[RAGPipeline] = None
 auto_ingest: Optional[NAACAutoIngest] = None
 scheduler: Optional[NAACUpdateScheduler] = None
 metadata_mapper: Optional[NAACMetadataMapper] = None
-<<<<<<< HEAD
 vector_store_instance: Optional[Any] = None
-=======
-vector_store_instance: Optional[SupabaseVectorStore] = None
 memory_store_instance: Optional[ConversationMemoryStore] = None
->>>>>>> d4d7b36e8e2c74b295865e36b713a2c69bb44ad5
 
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
@@ -98,6 +95,21 @@ class ScheduleRequest(BaseModel):
     schedule: str = Field(..., description="Cron expression or interval specification")
     criteria: Optional[List[str]] = Field(None, description="Criteria for criterion-specific jobs")
     enabled: bool = Field(True, description="Whether job should be enabled")
+
+
+class UploadResponse(BaseModel):
+    status: str = Field(..., description="Upload status")
+    message: str = Field(..., description="Upload result message")
+    filename: str = Field(..., description="Original uploaded filename")
+    stored_filename: str = Field(..., description="Filename used on the server")
+    stored_path: str = Field(..., description="Saved server file path for later ingestion")
+    document_type: str = Field(..., description="Document type associated with the file")
+    file_size: int = Field(..., description="Uploaded file size in bytes")
+    timestamp: str = Field(..., description="Upload completion timestamp")
+
+
+class StagedUploadDeleteRequest(BaseModel):
+    stored_path: str = Field(..., description="Server-side staged upload path to remove")
 
 # Lifespan management
 @asynccontextmanager
@@ -307,17 +319,6 @@ async def initialize_system():
                 embedding_model=settings.embedding_model,
                 embedding_device=settings.embedding_device,
             )
-
-<<<<<<< HEAD
-=======
-        vector_store = SupabaseVectorStore(
-            db_url=settings.supabase_db_url,
-            table_name=settings.supabase_table,
-            embedding_model=settings.embedding_model,
-            embedding_dim=settings.embedding_dim,
-            embedding_device=settings.embedding_device,
-        )
->>>>>>> d4d7b36e8e2c74b295865e36b713a2c69bb44ad5
         vector_store_instance = vector_store
 
         if settings.memory_enabled:
@@ -906,13 +907,11 @@ async def get_db_health(vector_store: Any = Depends(get_vector_store)):
 async def upload_document(
     file: UploadFile = File(...),
     document_type: str = Form("mvsr_evidence"),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
-    auto_ingest_system: NAACAutoIngest = Depends(get_auto_ingest)
 ):
     """
-    Upload and ingest a document file
-    
-    Accepts PDF files for immediate ingestion
+    Upload a document file and stage it for later ingestion
+
+    Accepts PDF files and stores them without chunking until an ingest request is made
     """
     try:
         # Validate file type
@@ -922,40 +921,56 @@ async def upload_document(
         # Create upload directory
         upload_dir = settings.get_uploads_path()
         
-        # Save uploaded file
-        file_path = upload_dir / file.filename
+        original_filename = Path(file.filename).name
+        stored_filename = f"{document_type}_{uuid4().hex}_{original_filename}"
+        file_path = upload_dir / stored_filename
         
         with open(file_path, "wb") as buffer:
             content = await file.read()
             buffer.write(content)
-        
-        # Start background ingestion
-        def run_upload_ingestion():
-            try:
-                result = auto_ingest_system.ingestion_pipeline.ingest_single_document(
-                    file_path=str(file_path),
-                    document_type=document_type
-                )
-                logger.info(f"Upload ingestion completed: {file.filename}")
-            except Exception as e:
-                logger.error(f"Upload ingestion failed: {e}")
-        
-        background_tasks.add_task(run_upload_ingestion)
-        
-        return {
-            "status": "accepted",
-            "message": f"File uploaded and ingestion started",
-            "filename": file.filename,
-            "document_type": document_type,
-            "file_size": len(content),
-            "timestamp": datetime.now().isoformat()
-        }
+
+        return UploadResponse(
+            status="staged",
+            message="File uploaded. Click Upload to start chunking and store it in the database.",
+            filename=original_filename,
+            stored_filename=stored_filename,
+            stored_path=str(file_path),
+            document_type=document_type,
+            file_size=len(content),
+            timestamp=datetime.now().isoformat(),
+        )
         
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"File upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@api_router.delete("/upload")
+async def delete_staged_upload(request: StagedUploadDeleteRequest):
+    """Delete a staged upload that has not yet been ingested."""
+    try:
+        upload_dir = settings.get_uploads_path().resolve()
+        stored_path = Path(request.stored_path).resolve()
+
+        if upload_dir not in stored_path.parents:
+            raise HTTPException(status_code=400, detail="Invalid staged upload path")
+
+        if stored_path.exists():
+            stored_path.unlink()
+
+        return {
+            "status": "deleted",
+            "message": "Staged upload removed",
+            "stored_path": str(stored_path),
+            "timestamp": datetime.now().isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete staged upload: {e}")
+        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
 
 # Expose key endpoints without the /api prefix for local probes and misconfigured proxies
 app.add_api_route("/health", health_check, methods=["GET"])
@@ -964,6 +979,7 @@ app.add_api_route("/scheduler/status", get_scheduler_status, methods=["GET"])
 app.add_api_route("/query", query_compliance, methods=["POST"])
 app.add_api_route("/db/health", get_db_health, methods=["GET"])
 app.add_api_route("/upload", upload_document, methods=["POST"])
+app.add_api_route("/upload", delete_staged_upload, methods=["DELETE"])
 
 # Include the API router in the main app
 app.include_router(api_router)
