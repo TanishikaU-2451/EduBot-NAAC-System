@@ -233,7 +233,7 @@ const App = () => {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <p className="eyebrow">EduBot</p>
+          <p className="brand-name">EduBot</p>
           <h1>Compliance Studio</h1>
           <p className="subtitle">Built for NAAC excellence</p>
         </div>

@@ -47,6 +47,22 @@ class ChromaVectorStore:
         self.mvsr_collection = self._get_or_create_collection("mvsr_evidence")
         
         logger.info("ChromaDB initialized with collections: naac_requirements, mvsr_evidence")
+
+    def health_check(self) -> Dict[str, Any]:
+        """Return lightweight health diagnostics comparable to Supabase backend."""
+        stats = self.get_collection_stats()
+        return {
+            "ok": True,
+            "backend": "chroma",
+            "persist_directory": str(self.persist_directory),
+            "naac_requirements_count": stats.get("naac_requirements_count", 0),
+            "mvsr_evidence_count": stats.get("mvsr_evidence_count", 0),
+            "total_documents": stats.get("total_documents", 0),
+        }
+
+    def consolidate_single_row_mode(self):
+        """API compatibility shim; Chroma already stores multiple rows efficiently."""
+        return
     
     def _get_or_create_collection(self, name: str):
         """Get existing collection or create new one"""

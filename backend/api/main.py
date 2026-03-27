@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from typing import Dict, Any, List, Optional, Union
+from typing import Any, Dict, List, Optional
 import logging
 import asyncio
 from datetime import datetime
@@ -25,7 +25,14 @@ except ImportError:
 # Import our system components
 from ..rag.pipeline import RAGPipeline
 from ..rag.metadata_mapper import NAACMetadataMapper
-from ..db.supabase_store import SupabaseVectorStore
+try:
+    from ..db.supabase_store import SupabaseVectorStore  # type: ignore[attr-defined]
+    SUPABASE_IMPORT_ERROR = None
+except Exception as import_exc:  # pragma: no cover - optional dependency
+    SupabaseVectorStore = None  # type: ignore[assignment]
+    SUPABASE_IMPORT_ERROR = import_exc
+
+from ..db.local_store import LocalVectorStore
 from ..llm.huggingface_client import HuggingFaceClient
 from ..ingestion.ingest import DocumentIngestionPipeline
 from ..updater.auto_ingest import NAACAutoIngest
@@ -47,7 +54,7 @@ rag_pipeline: Optional[RAGPipeline] = None
 auto_ingest: Optional[NAACAutoIngest] = None
 scheduler: Optional[NAACUpdateScheduler] = None
 metadata_mapper: Optional[NAACMetadataMapper] = None
-vector_store_instance: Optional[SupabaseVectorStore] = None
+vector_store_instance: Optional[Any] = None
 
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
@@ -227,18 +234,41 @@ async def initialize_system():
     global rag_pipeline, auto_ingest, scheduler, metadata_mapper, vector_store_instance
     
     try:
-        # Initialize Supabase vector store
-        if not settings.supabase_db_url:
-            raise ValueError("SUPABASE_DB_URL is required for Supabase vector backend")
+        # Initialize configured vector store with local fallback
+        vector_backend = (settings.vector_backend or "supabase").lower()
+        use_supabase = vector_backend == "supabase"
 
-        vector_store = SupabaseVectorStore(
-            db_url=settings.supabase_db_url,
-            table_name=settings.supabase_table,
-            embedding_model=settings.embedding_model,
-            embedding_dim=settings.embedding_dim,
-            embedding_device=settings.embedding_device,
-        )
-        vector_store.consolidate_single_row_mode()
+        if use_supabase and not settings.supabase_db_url:
+            logger.warning("SUPABASE_DB_URL missing; falling back to local vector store")
+            use_supabase = False
+
+        if use_supabase and SupabaseVectorStore is None:
+            logger.warning(
+                "Supabase backend requested but dependencies are unavailable: %s. "
+                "Falling back to local vector store.",
+                SUPABASE_IMPORT_ERROR,
+            )
+            use_supabase = False
+
+        if use_supabase and SupabaseVectorStore is not None:
+            logger.info("Initializing Supabase vector backend")
+            vector_store = SupabaseVectorStore(
+                db_url=settings.supabase_db_url,
+                table_name=settings.supabase_table,
+                embedding_model=settings.embedding_model,
+                embedding_dim=settings.embedding_dim,
+                embedding_device=settings.embedding_device,
+            )
+            consolidate = getattr(vector_store, "consolidate_single_row_mode", None)
+            if callable(consolidate):
+                consolidate()
+        else:
+            logger.info("Initializing in-memory vector backend for local usage")
+            vector_store = LocalVectorStore(
+                embedding_model=settings.embedding_model,
+                embedding_device=settings.embedding_device,
+            )
+
         vector_store_instance = vector_store
         
         # Initialize Hugging Face client
@@ -325,7 +355,7 @@ def get_metadata_mapper() -> NAACMetadataMapper:
     return metadata_mapper
 
 
-def get_vector_store() -> SupabaseVectorStore:
+def get_vector_store() -> Any:
     """Dependency to get vector store"""
     if vector_store_instance is None:
         raise HTTPException(status_code=503, detail="Vector store not initialized")
@@ -720,7 +750,7 @@ async def get_system_statistics(
 
 
 @api_router.get("/db/health")
-async def get_db_health(vector_store: SupabaseVectorStore = Depends(get_vector_store)):
+async def get_db_health(vector_store: Any = Depends(get_vector_store)):
     """Database health and connectivity diagnostics for Supabase."""
     try:
         health = vector_store.health_check()
