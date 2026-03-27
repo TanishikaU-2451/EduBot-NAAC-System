@@ -31,6 +31,9 @@ beautifulsoup4==4.12.2
 # Environment Management
 python-dotenv==1.0.0
 
+# Testing
+pytest==8.2.2
+
 # NOTE:
 # sqlite3, pathlib, and hashlib are Python standard-library modules.
 # They must not be listed in requirements.txt.
