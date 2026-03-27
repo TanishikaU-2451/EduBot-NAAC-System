@@ -16,8 +16,17 @@ class ApiService {
   private api: AxiosInstance
 
   constructor() {
+    const configuredBase = process.env.REACT_APP_API_BASE_URL
+    let normalizedBase = '/api'
+
+    if (configuredBase && configuredBase.trim()) {
+      const trimmed = configuredBase.trim().replace(/\/+$/, '')
+      // If user provides full backend host without /api, force API prefix.
+      normalizedBase = trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`
+    }
+
     this.api = axios.create({
-      baseURL: process.env.REACT_APP_API_BASE_URL || '/api',
+      baseURL: normalizedBase,
       timeout: 180000, // 3 minutes timeout for LLM responses on CPU
       headers: {
         'Content-Type': 'application/json',

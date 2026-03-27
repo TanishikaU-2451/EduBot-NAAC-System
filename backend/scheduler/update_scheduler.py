@@ -1,11 +1,11 @@
-"""
+﻿"""
 Update Scheduler for NAAC Compliance Intelligence System
 Handles automated scheduling and execution of document updates
 """
 
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -59,7 +59,7 @@ class NAACUpdateScheduler:
         Args:
             auto_ingest: Auto-ingest coordinator instance
             config_dir: Directory for scheduler configuration
-            db_url: Database URL for job persistence
+            db_url: Unused for in-memory scheduler (kept for backward compatibility)
         """
         self.auto_ingest = auto_ingest
         self.config_dir = Path(config_dir)
@@ -67,7 +67,7 @@ class NAACUpdateScheduler:
         
         # Configure job stores and executors
         jobstores = {
-            'default': SQLAlchemyJobStore(url=db_url)
+            'default': MemoryJobStore()
         }
         
         executors = {

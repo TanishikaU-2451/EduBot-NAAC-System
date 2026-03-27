@@ -9,7 +9,8 @@ pydantic-settings==2.0.3
 # RAG Components
 # Align sentence-transformers with latest huggingface_hub to avoid cached_download import errors
 sentence-transformers==2.7.0
-chromadb==0.4.24
+# Supabase / Postgres vector store
+psycopg2-binary==2.9.9
 
 # LLM Integration
 huggingface-hub==0.33.4

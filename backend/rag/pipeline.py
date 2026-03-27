@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from collections import deque
 
-from ..db.chroma_store import ChromaVectorStore
+from typing import Protocol
+
+
+class VectorStore(Protocol):
+    def query_naac_requirements(self, query_text: str, n_results: int = 5, criterion_filter: str | None = None) -> Dict[str, Any]: ...
+    def query_mvsr_evidence(self, query_text: str, n_results: int = 5, category_filter: str | None = None) -> Dict[str, Any]: ...
 from ..llm.huggingface_client import HuggingFaceClient
 from .retriever import ComplianceRetriever, RetrievalResult
 from .generator import ComplianceGenerator, GenerationContext
@@ -33,7 +38,7 @@ class RAGPipeline:
     """
     
     def __init__(self, 
-                 chroma_store: ChromaVectorStore,
+                 chroma_store: VectorStore,
                  llm_client: HuggingFaceClient,
                  retrieval_config: Optional[Dict[str, Any]] = None):
         """
@@ -63,7 +68,7 @@ class RAGPipeline:
         # Initialize generator
         self.generator = ComplianceGenerator(
             llm_client=llm_client,
-            max_context_length=retrieval_config.get('max_context_length', 3000)
+            max_context_length=retrieval_config.get('max_context_length', 12000)
         )
         
         # Query processing patterns
@@ -378,12 +383,12 @@ class RAGPipeline:
         """Generate structured error response"""
         
         return {
-            'naac_requirement': 'Unable to retrieve NAAC requirements due to system error',
-            'mvsr_evidence': 'Unable to retrieve MVSR evidence due to system error',
-            'naac_mapping': 'Error in processing',
+            'naac_requirement': '',
+            'mvsr_evidence': '',
+            'naac_mapping': '',
             'compliance_analysis': f'Query processing failed: {error}',
             'status': 'Processing Error',
-            'recommendations': 'Please check system configuration and try again',
+            'recommendations': '',
             'query_processed': False,
             'error_details': {
                 'original_query': query,

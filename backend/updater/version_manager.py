@@ -15,8 +15,7 @@ from collections import defaultdict
 
 from .naac_watcher import DocumentInfo
 from .downloader import DownloadResult
-from ..db.chroma_store import ChromaVectorStore
-from ..ingestion.ingest import DocumentIngestionPipeline
+from ..ingestion.ingest import DocumentIngestionPipeline, VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,7 @@ class NAACVersionManager:
     
     def __init__(self, 
                  storage_dir: str = "./naac_versions",
-                 chroma_store: Optional[ChromaVectorStore] = None,
+                 chroma_store: Optional[VectorStore] = None,
                  ingestion_pipeline: Optional[DocumentIngestionPipeline] = None,
                  max_versions_per_document: int = 5):
         """
@@ -60,7 +59,7 @@ class NAACVersionManager:
         
         Args:
             storage_dir: Directory to store versioned documents
-            chroma_store: ChromaDB vector store for knowledge base updates
+            chroma_store: Vector store for knowledge base updates
             ingestion_pipeline: Document ingestion pipeline
             max_versions_per_document: Maximum number of versions to keep per document
         """

@@ -1,0 +1,13 @@
+create extension if not exists vector;
+create table public.chunks (
+  id uuid primary key default gen_random_uuid(),
+  doc_type text not null,
+  content text not null,
+  metadata jsonb not null,
+  embedding vector(384) not null,
+  created_at timestamptz default now()
+);
+create index on public.chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+create index on public.chunks(doc_type);
+create index on public.chunks((metadata->>'criterion'));
+create index on public.chunks((metadata->>'category'));

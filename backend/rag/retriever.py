@@ -8,7 +8,12 @@ import logging
 from dataclasses import dataclass
 import re
 
-from ..db.chroma_store import ChromaVectorStore
+from typing import Protocol
+
+
+class VectorStore(Protocol):
+    def query_naac_requirements(self, query_text: str, n_results: int = 5, criterion_filter: Optional[str] = None) -> Dict[str, Any]: ...
+    def query_mvsr_evidence(self, query_text: str, n_results: int = 5, category_filter: Optional[str] = None) -> Dict[str, Any]: ...
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +32,7 @@ class ComplianceRetriever:
     """
     
     def __init__(self, 
-                 chroma_store: ChromaVectorStore,
+                 chroma_store: VectorStore,
                  default_k_naac: int = 5,
                  default_k_mvsr: int = 5,
                  similarity_threshold: float = 0.3):
@@ -64,8 +69,9 @@ class ComplianceRetriever:
         Returns:
             Tuple of (naac_results, mvsr_results)
         """
-        k_naac = k_naac or self.default_k_naac
-        k_mvsr = k_mvsr or self.default_k_mvsr
+        # Single-row mode: one NAAC row and one MVSR row are enough.
+        k_naac = 1
+        k_mvsr = 1
         
         logger.info(f"Retrieving compliance context for query: '{query[:100]}...'")
         
@@ -99,11 +105,12 @@ class ComplianceRetriever:
 
         This is useful for compliance checking where exact phrases/conditions matter.
         """
-        k_naac = k_naac or self.default_k_naac
-        k_mvsr = k_mvsr or self.default_k_mvsr
+        # Single-row mode: hybrid reranking is not meaningful with one row per type.
+        k_naac = 1
+        k_mvsr = 1
 
-        candidate_k_naac = max(k_naac * candidate_multiplier, k_naac)
-        candidate_k_mvsr = max(k_mvsr * candidate_multiplier, k_mvsr)
+        candidate_k_naac = 1
+        candidate_k_mvsr = 1
 
         logger.info(
             f"Hybrid retrieval for query: '{query[:100]}...' (dense={dense_weight:.2f}, lexical={lexical_weight:.2f})"

@@ -1,0 +1,50 @@
+[
+  {
+    "file_path": "uploads\\questionnaire.pdf",
+    "file_name": "questionnaire.pdf",
+    "file_hash": "67e5700eabfa3eac",
+    "document_type": "mvsr_evidence",
+    "chunk_count": 1,
+    "timestamp": "2026-03-27T06:53:07.603220"
+  },
+  {
+    "file_path": "uploads\\3. FERPA Compliance Policy.pdf",
+    "file_name": "3. FERPA Compliance Policy.pdf",
+    "file_hash": "fb996cd66d6e9ef3",
+    "document_type": "naac_requirement",
+    "chunk_count": 2,
+    "timestamp": "2026-03-27T06:54:34.909470"
+  },
+  {
+    "file_path": "uploads\\week 20th oct.pdf",
+    "file_name": "week 20th oct.pdf",
+    "file_hash": "88778037b170884e",
+    "document_type": "naac_requirement",
+    "chunk_count": 6,
+    "timestamp": "2026-03-27T06:57:21.041594"
+  },
+  {
+    "file_path": "uploads\\questionnaire_answers.pdf",
+    "file_name": "questionnaire_answers.pdf",
+    "file_hash": "08c5843a3272fc2f",
+    "document_type": "mvsr_evidence",
+    "chunk_count": 3,
+    "timestamp": "2026-03-27T06:57:55.204849"
+  },
+  {
+    "file_path": "uploads\\3. FERPA Compliance Policy.pdf",
+    "file_name": "3. FERPA Compliance Policy.pdf",
+    "file_hash": "fb996cd66d6e9ef3",
+    "document_type": "naac_requirement",
+    "chunk_count": 1,
+    "timestamp": "2026-03-27T07:11:07.459397"
+  },
+  {
+    "file_path": "uploads\\questionnaire_answers.pdf",
+    "file_name": "questionnaire_answers.pdf",
+    "file_hash": "08c5843a3272fc2f",
+    "document_type": "mvsr_evidence",
+    "chunk_count": 1,
+    "timestamp": "2026-03-27T07:11:49.076604"
+  }
+]

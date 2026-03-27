@@ -162,18 +162,6 @@ class ComplianceGenerator:
         cleaned = re.sub(r'--- Page \d+ ---', '', cleaned)
         cleaned = re.sub(r'--- Table \d+ on Page \d+ ---', '', cleaned)
         
-        # Ensure reasonable length
-        if len(cleaned) > 1000:
-            # Try to find a good break point
-            sentences = cleaned.split('.')
-            truncated = ''
-            for sentence in sentences:
-                if len(truncated + sentence) < 900:
-                    truncated += sentence + '.'
-                else:
-                    break
-            cleaned = truncated if truncated else cleaned[:900] + '...'
-        
         return cleaned.strip()
     
     def _truncate_context(self, 
@@ -291,7 +279,7 @@ class ComplianceGenerator:
             completeness += 0.25
         if response.get('mvsr_evidence') and len(response['mvsr_evidence']) > 50:
             completeness += 0.25
-        if response.get('naac_mapping') and response['naac_mapping'] != "Error in processing":
+        if response.get('naac_mapping'):
             completeness += 0.25
         if response.get('compliance_analysis') and len(response['compliance_analysis']) > 100:
             completeness += 0.25

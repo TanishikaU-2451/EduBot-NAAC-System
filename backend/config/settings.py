@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     # Database settings
     chroma_db_path: str = Field("./chroma_db", env="CHROMA_DB_PATH")
     job_store_url: str = Field("sqlite:///jobs.sqlite", env="JOB_STORE_URL")
+    vector_backend: str = Field("supabase", env="VECTOR_BACKEND")
+    supabase_db_url: Optional[str] = Field(None, env="SUPABASE_DB_URL")
+    supabase_table: str = Field("chunks", env="SUPABASE_TABLE")
+    embedding_dim: int = Field(384, env="EMBEDDING_DIM")
     
     # Hugging Face Inference API settings
     hf_model: str = Field("meta-llama/Meta-Llama-3.1-8B-Instruct", env="HF_MODEL")

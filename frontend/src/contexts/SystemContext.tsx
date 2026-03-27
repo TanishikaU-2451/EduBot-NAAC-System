@@ -26,7 +26,8 @@ export const SystemProvider: React.FC<SystemProviderProps> = ({ children }) => {
       // Handle health data
       if (healthData.status === 'fulfilled') {
         setSystemHealth(healthData.value)
-        setIsHealthy(healthData.value.status === 'healthy')
+        // Treat degraded as operational so uploads/queries remain usable.
+        setIsHealthy(healthData.value.status !== 'unhealthy')
       } else {
         console.error('Failed to fetch system health:', healthData.reason)
         setIsHealthy(false)

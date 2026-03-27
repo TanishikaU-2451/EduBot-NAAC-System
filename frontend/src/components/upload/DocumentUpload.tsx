@@ -21,27 +21,39 @@ import { useSystem } from '../../contexts/SystemContext'
 import apiService, { getErrorMessage } from '../../services/api'
 
 const DocumentUpload: React.FC = () => {
-  const [uploadFiles, setUploadFiles] = useState<File[]>([])
+  const [filesByType, setFilesByType] = useState<Record<'naac_requirement' | 'mvsr_evidence', File[]>>({
+    naac_requirement: [],
+    mvsr_evidence: [],
+  })
   const [isUploading, setIsUploading] = useState(false)
   const [uploadResults, setUploadResults] = useState<string[]>([])
   const [documentType, setDocumentType] = useState<'naac_requirement' | 'mvsr_evidence'>('mvsr_evidence')
   const { isHealthy } = useSystem()
 
+  const selectedFiles = filesByType[documentType]
+
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.files) {
-      setUploadFiles(Array.from(event.target.files))
+      const nextFiles = Array.from(event.target.files)
+      setFilesByType((prev) => ({
+        ...prev,
+        [documentType]: nextFiles,
+      }))
+
+      // Allow selecting the same file again after switching types.
+      event.target.value = ''
     }
   }
 
   const handleUpload = async () => {
-    if (uploadFiles.length === 0) return
+    if (selectedFiles.length === 0) return
 
     setIsUploading(true)
     setUploadResults([])
 
     try {
       const results = await Promise.all(
-        uploadFiles.map(async (file) => {
+        selectedFiles.map(async (file) => {
           try {
             const result = await apiService.uploadDocument(file, documentType)
             return `✅ ${file.name}: ${result.message}`
@@ -124,13 +136,13 @@ const DocumentUpload: React.FC = () => {
                 </label>
               </Box>
 
-              {uploadFiles.length > 0 && (
+              {selectedFiles.length > 0 && (
                 <Box sx={{ mb: 2 }}>
                   <Typography variant="subtitle2" gutterBottom>
-                    Selected Files:
+                    Selected Files ({documentType === 'naac_requirement' ? 'NAAC Requirements' : 'MVSR Evidence'}):
                   </Typography>
                   <List dense>
-                    {uploadFiles.map((file, index) => (
+                    {selectedFiles.map((file, index) => (
                       <ListItem key={index}>
                         <ListItemText
                           primary={file.name}
@@ -146,10 +158,10 @@ const DocumentUpload: React.FC = () => {
                 variant="contained"
                 startIcon={<UploadIcon />}
                 onClick={handleUpload}
-                disabled={uploadFiles.length === 0 || isUploading || !isHealthy}
+                disabled={selectedFiles.length === 0 || isUploading}
                 fullWidth
               >
-                {isUploading ? 'Uploading...' : `Upload ${uploadFiles.length} File(s)`}
+                {isUploading ? 'Uploading...' : `Upload ${selectedFiles.length} File(s)`}
               </Button>
 
               {isUploading && <LinearProgress sx={{ mt: 2 }} />}

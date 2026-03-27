@@ -12,7 +12,14 @@ from datetime import datetime
 
 from .pdf_loader import PDFLoader, DocumentMetadata
 from .chunker import DocumentChunker, TextChunk
-from ..db.chroma_store import ChromaVectorStore
+from typing import Protocol
+
+
+class VectorStore(Protocol):
+    def add_naac_documents(self, documents: List[str], metadatas: List[Dict[str, Any]]): ...
+    def add_mvsr_documents(self, documents: List[str], metadatas: List[Dict[str, Any]]): ...
+    def get_collection_stats(self) -> Dict[str, Any]: ...
+    def update_naac_version(self, old_version: str, new_version: str): ...
 
 logger = logging.getLogger(__name__)
 
@@ -26,18 +33,18 @@ class DocumentIngestionPipeline:
     """
     
     def __init__(self, 
-                 chroma_store: ChromaVectorStore,
+                 vector_store: VectorStore,
                  chunk_size: int = 512,
                  chunk_overlap: int = 50):
         """
         Initialize ingestion pipeline
         
         Args:
-            chroma_store: ChromaDB vector store instance
+            vector_store: Vector store instance (Supabase pgvector)
             chunk_size: Target size for text chunks
             chunk_overlap: Overlap between consecutive chunks
         """
-        self.chroma_store = chroma_store
+        self.vector_store = vector_store
         self.pdf_loader = PDFLoader()
         self.chunker = DocumentChunker(
             chunk_size=chunk_size,
@@ -68,9 +75,11 @@ class DocumentIngestionPipeline:
         if not directory.exists():
             raise FileNotFoundError(f"NAAC directory not found: {directory}")
         
-        # Load all PDFs from directory and subdirectories
+        # Load all PDFs from directory and subdirectories and aggregate into one NAAC row.
         document_results = []
-        total_chunks = 0
+        total_rows_written = 0
+        aggregated_documents: List[str] = []
+        aggregated_metadata: List[Dict[str, Any]] = []
         
         # Process criterion subdirectories
         for criterion_dir in directory.iterdir():
@@ -93,26 +102,20 @@ class DocumentIngestionPipeline:
                         metadata.criterion = criterion_num
                         metadata.version = version
                         
-                        # Chunk the document
-                        chunks = self.chunker.chunk_document(text, metadata.__dict__)
-                        
-                        if chunks:
-                            # Prepare for vector store
-                            documents, metadatas = self.chunker.prepare_for_vectorstore(chunks)
-                            
-                            # Add to ChromaDB
-                            self.chroma_store.add_naac_documents(documents, metadatas)
-                            
+                        cleaned_text = " ".join(text.split())
+                        if cleaned_text:
+                            aggregated_documents.append(cleaned_text)
+                            aggregated_metadata.append(metadata.__dict__.copy())
+
                             # Log successful ingestion
-                            self._log_ingestion(pdf_file, "naac_requirement", len(chunks))
-                            
+                            self._log_ingestion(pdf_file, "naac_requirement", 1)
+
                             document_results.append({
                                 'file': pdf_file.name,
                                 'criterion': criterion_num,
-                                'chunks': len(chunks),
+                                'rows': 1,
                                 'status': 'success'
                             })
-                            total_chunks += len(chunks)
                         
                     except Exception as e:
                         logger.error(f"Failed to ingest NAAC document {pdf_file.name}: {e}")
@@ -134,36 +137,43 @@ class DocumentIngestionPipeline:
                 text, metadata = self.pdf_loader.load_pdf(str(pdf_file), "naac_requirement")
                 metadata.version = version
                 
-                chunks = self.chunker.chunk_document(text, metadata.__dict__)
-                
-                if chunks:
-                    documents, metadatas = self.chunker.prepare_for_vectorstore(chunks)
-                    self.chroma_store.add_naac_documents(documents, metadatas)
-                    self._log_ingestion(pdf_file, "naac_requirement", len(chunks))
-                    
+                cleaned_text = " ".join(text.split())
+
+                if cleaned_text:
+                    aggregated_documents.append(cleaned_text)
+                    aggregated_metadata.append(metadata.__dict__.copy())
+                    self._log_ingestion(pdf_file, "naac_requirement", 1)
+
                     document_results.append({
                         'file': pdf_file.name,
                         'criterion': metadata.criterion or 'general',
-                        'chunks': len(chunks),
+                        'rows': 1,
                         'status': 'success'
                     })
-                    total_chunks += len(chunks)
                     
             except Exception as e:
                 logger.error(f"Failed to ingest NAAC document {pdf_file.name}: {e}")
                 
         
+        if aggregated_documents:
+            self.vector_store.add_naac_documents(aggregated_documents, aggregated_metadata)
+            total_rows_written = 1
+
         results = {
             'document_type': 'naac_requirements',
             'total_files_processed': len(document_results),
             'successful_files': len([r for r in document_results if r['status'] == 'success']),
-            'total_chunks_created': total_chunks,
+            'total_rows_written': total_rows_written,
             'version': version,
             'ingestion_timestamp': datetime.now().isoformat(),
             'detailed_results': document_results
         }
         
-        logger.info(f"NAAC ingestion completed: {results['successful_files']} files, {total_chunks} chunks")
+        logger.info(
+            "NAAC ingestion completed: %s files aggregated into %s row(s)",
+            results['successful_files'],
+            total_rows_written,
+        )
         return results
     
     def ingest_mvsr_documents(self, 
@@ -186,7 +196,9 @@ class DocumentIngestionPipeline:
             raise FileNotFoundError(f"MVSR directory not found: {directory}")
         
         document_results = []
-        total_chunks = 0
+        total_rows_written = 0
+        aggregated_documents: List[str] = []
+        aggregated_metadata: List[Dict[str, Any]] = []
         
         # Process category subdirectories
         for category_dir in directory.iterdir():
@@ -208,27 +220,21 @@ class DocumentIngestionPipeline:
                         # Override category from directory structure
                         metadata.category = category
                         
-                        # Chunk the document
-                        chunks = self.chunker.chunk_document(text, metadata.__dict__)
-                        
-                        if chunks:
-                            # Prepare for vector store
-                            documents, metadatas = self.chunker.prepare_for_vectorstore(chunks)
-                            
-                            # Add to ChromaDB
-                            self.chroma_store.add_mvsr_documents(documents, metadatas)
-                            
+                        cleaned_text = " ".join(text.split())
+                        if cleaned_text:
+                            aggregated_documents.append(cleaned_text)
+                            aggregated_metadata.append(metadata.__dict__.copy())
+
                             # Log successful ingestion
-                            self._log_ingestion(pdf_file, "mvsr_evidence", len(chunks))
-                            
+                            self._log_ingestion(pdf_file, "mvsr_evidence", 1)
+
                             document_results.append({
                                 'file': pdf_file.name,
                                 'category': category,
                                 'mapped_criterion': metadata.criterion,
-                                'chunks': len(chunks),
+                                'rows': 1,
                                 'status': 'success'
                             })
-                            total_chunks += len(chunks)
                         
                     except Exception as e:
                         logger.error(f"Failed to ingest MVSR document {pdf_file.name}: {e}")
@@ -248,35 +254,42 @@ class DocumentIngestionPipeline:
                     continue
                 
                 text, metadata = self.pdf_loader.load_pdf(str(pdf_file), "mvsr_evidence")
-                chunks = self.chunker.chunk_document(text, metadata.__dict__)
-                
-                if chunks:
-                    documents, metadatas = self.chunker.prepare_for_vectorstore(chunks)
-                    self.chroma_store.add_mvsr_documents(documents, metadatas)
-                    self._log_ingestion(pdf_file, "mvsr_evidence", len(chunks))
-                    
+                cleaned_text = " ".join(text.split())
+
+                if cleaned_text:
+                    aggregated_documents.append(cleaned_text)
+                    aggregated_metadata.append(metadata.__dict__.copy())
+                    self._log_ingestion(pdf_file, "mvsr_evidence", 1)
+
                     document_results.append({
                         'file': pdf_file.name,
                         'category': metadata.category or 'general',
                         'mapped_criterion': metadata.criterion,
-                        'chunks': len(chunks),
+                        'rows': 1,
                         'status': 'success'
                     })
-                    total_chunks += len(chunks)
                     
             except Exception as e:
                 logger.error(f"Failed to ingest MVSR document {pdf_file.name}: {e}")
         
+        if aggregated_documents:
+            self.vector_store.add_mvsr_documents(aggregated_documents, aggregated_metadata)
+            total_rows_written = 1
+
         results = {
             'document_type': 'mvsr_evidence',
             'total_files_processed': len(document_results),
             'successful_files': len([r for r in document_results if r['status'] == 'success']),
-            'total_chunks_created': total_chunks,
+            'total_rows_written': total_rows_written,
             'ingestion_timestamp': datetime.now().isoformat(),
             'detailed_results': document_results
         }
         
-        logger.info(f"MVSR ingestion completed: {results['successful_files']} files, {total_chunks} chunks")
+        logger.info(
+            "MVSR ingestion completed: %s files aggregated into %s row(s)",
+            results['successful_files'],
+            total_rows_written,
+        )
         return results
     
     def ingest_single_document(self, 
@@ -309,39 +322,39 @@ class DocumentIngestionPipeline:
                 for key, value in additional_metadata.items():
                     setattr(metadata, key, value)
             
-            # Chunk document
-            chunks = self.chunker.chunk_document(text, metadata.__dict__)
-            
-            if not chunks:
+            cleaned_text = " ".join(text.split())
+
+            if not cleaned_text:
                 return {
                     'file': file_path.name,
                     'status': 'failed',
-                    'error': 'No chunks created from document'
+                    'error': 'No text extracted from document'
                 }
-            
-            # Prepare and store in vector database
-            documents, metadatas = self.chunker.prepare_for_vectorstore(chunks)
+
+            # Store as one full-document row for the selected type.
+            documents = [cleaned_text]
+            metadatas = [metadata.__dict__.copy()]
             
             if document_type == "naac_requirement":
-                self.chroma_store.add_naac_documents(documents, metadatas)
+                self.vector_store.add_naac_documents(documents, metadatas)
             elif document_type == "mvsr_evidence":
-                self.chroma_store.add_mvsr_documents(documents, metadatas)
+                self.vector_store.add_mvsr_documents(documents, metadatas)
             else:
                 raise ValueError(f"Invalid document type: {document_type}")
             
             # Log ingestion
-            self._log_ingestion(file_path, document_type, len(chunks))
+            self._log_ingestion(file_path, document_type, 1)
             
             result = {
                 'file': file_path.name,
                 'document_type': document_type,
-                'chunks_created': len(chunks),
+                'rows_written': 1,
                 'status': 'success',
                 'ingestion_timestamp': datetime.now().isoformat(),
                 'metadata': metadata.__dict__
             }
             
-            logger.info(f"Successfully ingested {file_path.name}: {len(chunks)} chunks")
+            logger.info("Successfully ingested %s as one full-text row", file_path.name)
             return result
             
         except Exception as e:
@@ -354,7 +367,7 @@ class DocumentIngestionPipeline:
     
     def get_ingestion_statistics(self) -> Dict[str, Any]:
         """Get comprehensive ingestion statistics"""
-        chroma_stats = self.chroma_store.get_collection_stats()
+        chroma_stats = self.vector_store.get_collection_stats()
         
         # Count by document type in ingestion log
         naac_files = len([entry for entry in self.ingestion_log 

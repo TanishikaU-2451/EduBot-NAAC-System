@@ -3,7 +3,7 @@ FastAPI Main Application for NAAC Compliance Intelligence System
 Provides REST API endpoints for the complete RAG pipeline and auto-update system
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File, APIRouter
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File, Form, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -25,7 +25,7 @@ except ImportError:
 # Import our system components
 from ..rag.pipeline import RAGPipeline
 from ..rag.metadata_mapper import NAACMetadataMapper
-from ..db.chroma_store import ChromaVectorStore
+from ..db.supabase_store import SupabaseVectorStore
 from ..llm.huggingface_client import HuggingFaceClient
 from ..ingestion.ingest import DocumentIngestionPipeline
 from ..updater.auto_ingest import NAACAutoIngest
@@ -35,8 +35,11 @@ from ..config.settings import get_settings
 # Get application settings
 settings = get_settings()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging from settings for easier DB diagnostics
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 # Global system components (initialized on startup)
@@ -44,6 +47,7 @@ rag_pipeline: Optional[RAGPipeline] = None
 auto_ingest: Optional[NAACAutoIngest] = None
 scheduler: Optional[NAACUpdateScheduler] = None
 metadata_mapper: Optional[NAACMetadataMapper] = None
+vector_store_instance: Optional[SupabaseVectorStore] = None
 
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
@@ -119,50 +123,48 @@ app.add_middleware(
 )
 
 # System initialization functions
-def _ingest_markdown_docs(chroma_store: ChromaVectorStore, data_dir: Path) -> None:
-    """Ingest markdown/text documents into ChromaDB if collections are empty."""
+def _ingest_markdown_docs(vector_store, data_dir: Path) -> None:
+    """Ingest markdown/text documents into the vector store if empty."""
     try:
         # Check if already populated
-        naac_count = chroma_store.naac_collection.count()
-        mvsr_count = chroma_store.mvsr_collection.count()
+        stats = vector_store.get_collection_stats()
+        naac_count = stats.get("naac_requirements_count", 0)
+        mvsr_count = stats.get("mvsr_evidence_count", 0)
         if naac_count > 0 and mvsr_count > 0:
             logger.info(f"Collections already have data: {naac_count} NAAC, {mvsr_count} MVSR docs. Skipping ingestion.")
             return
 
-        def chunk_text(text: str, size: int = 800, overlap: int = 100) -> List[str]:
-            words = text.split()
-            chunks, i = [], 0
-            while i < len(words):
-                chunk = " ".join(words[i:i + size])
-                if chunk.strip():
-                    chunks.append(chunk)
-                i += size - overlap
-            return chunks
-
         # Ingest NAAC documents
         naac_dir = data_dir / "naac_documents"
+        naac_docs: List[str] = []
+        naac_metas: List[Dict[str, Any]] = []
         if naac_dir.exists():
             for f in naac_dir.glob("*"):
                 if f.suffix.lower() in {".md", ".txt"}:
                     text = f.read_text(encoding="utf-8", errors="ignore")
-                    chunks = chunk_text(text)
-                    if not chunks:
+                    cleaned_text = " ".join(text.split())
+                    if not cleaned_text:
                         continue
                     criterion = "1"
                     for c in ["1","2","3","4","5","6","7"]:
                         if f"criterion_{c}" in f.name.lower() or f"criteria_{c}" in f.name.lower():
                             criterion = c; break
-                    metadatas = [{
+                    naac_docs.append(cleaned_text)
+                    naac_metas.append({
                         "type": "requirement", "criterion": criterion,
                         "version": "2025", "source_file": f.name,
                         "indicator": f"{criterion}.1"
-                    } for _ in chunks]
-                    chroma_store.add_naac_documents(chunks, metadatas)
-                    logger.info(f"Ingested NAAC file: {f.name} ({len(chunks)} chunks)")
+                    })
+
+        if naac_docs:
+            vector_store.add_naac_documents(naac_docs, naac_metas)
+            logger.info("Ingested startup NAAC corpus as one aggregated row from %s files", len(naac_docs))
 
         # Ingest MVSR SSR PDF from mvsr_evidence/reports/
         ssr_dir = data_dir / "mvsr_evidence" / "reports"
         ssr_ingested = False
+        mvsr_docs: List[str] = []
+        mvsr_metas: List[Dict[str, Any]] = []
         if ssr_dir.exists() and PDF_SUPPORT:
             for f in ssr_dir.glob("*.pdf"):
                 try:
@@ -170,17 +172,17 @@ def _ingest_markdown_docs(chroma_store: ChromaVectorStore, data_dir: Path) -> No
                     if not text or not text.strip():
                         logger.warning(f"No text extracted from SSR PDF: {f.name}")
                         continue
-                    chunks = chunk_text(text)
-                    if not chunks:
+                    cleaned_text = " ".join(text.split())
+                    if not cleaned_text:
                         continue
-                    metadatas = [{
+                    mvsr_docs.append(cleaned_text)
+                    mvsr_metas.append({
                         "type": "evidence", "criterion": "1",
                         "document": f.stem.replace("-", " ").replace("_", " "),
                         "year": 2019, "category": "ssr",
                         "source_file": f.name
-                    } for _ in chunks]
-                    chroma_store.add_mvsr_documents(chunks, metadatas)
-                    logger.info(f"Ingested MVSR SSR PDF: {f.name} ({len(chunks)} chunks)")
+                    })
+                    logger.info("Prepared MVSR SSR PDF for aggregated ingest: %s", f.name)
                     ssr_ingested = True
                 except Exception as pdf_err:
                     logger.error(f"Failed to extract PDF {f.name}: {pdf_err}")
@@ -194,22 +196,26 @@ def _ingest_markdown_docs(chroma_store: ChromaVectorStore, data_dir: Path) -> No
                 for f in mvsr_dir.glob("*"):
                     if f.suffix.lower() in {".md", ".txt"}:
                         text = f.read_text(encoding="utf-8", errors="ignore")
-                        chunks = chunk_text(text)
-                        if not chunks:
+                        cleaned_text = " ".join(text.split())
+                        if not cleaned_text:
                             continue
                         category = "general"
                         if "research" in f.name.lower():
                             category = "research"
                         elif "academic" in f.name.lower():
                             category = "academic"
-                        metadatas = [{
+                        mvsr_docs.append(cleaned_text)
+                        mvsr_metas.append({
                             "type": "evidence", "criterion": "1",
                             "document": f.stem.replace("_", " "),
                             "year": 2024, "category": category,
                             "source_file": f.name
-                        } for _ in chunks]
-                        chroma_store.add_mvsr_documents(chunks, metadatas)
-                        logger.info(f"Ingested MVSR fallback file: {f.name} ({len(chunks)} chunks)")
+                        })
+                        logger.info("Prepared MVSR fallback file for aggregated ingest: %s", f.name)
+
+        if mvsr_docs:
+            vector_store.add_mvsr_documents(mvsr_docs, mvsr_metas)
+            logger.info("Ingested startup MVSR corpus as one aggregated row from %s files", len(mvsr_docs))
 
         logger.info("Startup document ingestion complete.")
     except Exception as e:
@@ -218,11 +224,22 @@ def _ingest_markdown_docs(chroma_store: ChromaVectorStore, data_dir: Path) -> No
 
 async def initialize_system():
     """Initialize all system components"""
-    global rag_pipeline, auto_ingest, scheduler, metadata_mapper
+    global rag_pipeline, auto_ingest, scheduler, metadata_mapper, vector_store_instance
     
     try:
-        # Initialize ChromaDB
-        chroma_store = ChromaVectorStore(persist_directory=str(settings.get_chroma_path()))
+        # Initialize Supabase vector store
+        if not settings.supabase_db_url:
+            raise ValueError("SUPABASE_DB_URL is required for Supabase vector backend")
+
+        vector_store = SupabaseVectorStore(
+            db_url=settings.supabase_db_url,
+            table_name=settings.supabase_table,
+            embedding_model=settings.embedding_model,
+            embedding_dim=settings.embedding_dim,
+            embedding_device=settings.embedding_device,
+        )
+        vector_store.consolidate_single_row_mode()
+        vector_store_instance = vector_store
         
         # Initialize Hugging Face client
         llm_client = HuggingFaceClient(
@@ -232,11 +249,11 @@ async def initialize_system():
         )
         
         # Initialize ingestion pipeline
-        ingestion_pipeline = DocumentIngestionPipeline(chroma_store=chroma_store)
+        ingestion_pipeline = DocumentIngestionPipeline(vector_store=vector_store)
         
         # Initialize RAG pipeline
         rag_pipeline = RAGPipeline(
-            chroma_store=chroma_store,
+            chroma_store=vector_store,
             llm_client=llm_client,
             retrieval_config={
                 "default_k_naac": settings.max_retrieval_results,
@@ -253,7 +270,7 @@ async def initialize_system():
         auto_ingest = NAACAutoIngest(
             data_dir=str(settings.get_data_path()),
             cache_dir=str(settings.get_cache_path()),
-            chroma_store=chroma_store,
+            chroma_store=vector_store,
             ingestion_pipeline=ingestion_pipeline
         )
         
@@ -267,7 +284,7 @@ async def initialize_system():
         scheduler.start()
         
         # Ingest markdown knowledge base docs if collections are empty
-        await asyncio.to_thread(_ingest_markdown_docs, chroma_store, settings.get_data_path())
+        await asyncio.to_thread(_ingest_markdown_docs, vector_store, settings.get_data_path())
         
         logger.info("All system components initialized")
         
@@ -306,6 +323,13 @@ def get_metadata_mapper() -> NAACMetadataMapper:
     if metadata_mapper is None:
         raise HTTPException(status_code=503, detail="Metadata mapper not initialized")
     return metadata_mapper
+
+
+def get_vector_store() -> SupabaseVectorStore:
+    """Dependency to get vector store"""
+    if vector_store_instance is None:
+        raise HTTPException(status_code=503, detail="Vector store not initialized")
+    return vector_store_instance
 
 # API Endpoints
 
@@ -694,11 +718,24 @@ async def get_system_statistics(
         logger.error(f"Statistics request failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
 
+
+@api_router.get("/db/health")
+async def get_db_health(vector_store: SupabaseVectorStore = Depends(get_vector_store)):
+    """Database health and connectivity diagnostics for Supabase."""
+    try:
+        health = vector_store.health_check()
+        if not health.get("ok", False):
+            return JSONResponse(status_code=503, content=health)
+        return health
+    except Exception as e:
+        logger.error(f"DB health check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"DB health check failed: {str(e)}")
+
 # File upload endpoint
 @api_router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    document_type: str = "mvsr_evidence",
+    document_type: str = Form("mvsr_evidence"),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     auto_ingest_system: NAACAutoIngest = Depends(get_auto_ingest)
 ):
@@ -755,6 +792,8 @@ app.add_api_route("/health", health_check, methods=["GET"])
 app.add_api_route("/stats", get_system_statistics, methods=["GET"])
 app.add_api_route("/scheduler/status", get_scheduler_status, methods=["GET"])
 app.add_api_route("/query", query_compliance, methods=["POST"])
+app.add_api_route("/db/health", get_db_health, methods=["GET"])
+app.add_api_route("/upload", upload_document, methods=["POST"])
 
 # Include the API router in the main app
 app.include_router(api_router)

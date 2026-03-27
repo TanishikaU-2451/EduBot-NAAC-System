@@ -95,11 +95,11 @@ class HuggingFaceClient:
         context_parts = []
 
         if naac_context:
-            naac_text = "\n".join(naac_context[:3])[:2200]
+            naac_text = naac_context[0]
             context_parts.append(f"NAAC REQUIREMENT CONTEXT:\n{naac_text}")
 
         if mvsr_context:
-            mvsr_text = "\n".join(mvsr_context[:3])[:2200]
+            mvsr_text = mvsr_context[0]
             context_parts.append(f"COLLEGE REPORT / EVIDENCE CONTEXT:\n{mvsr_text}")
 
         context_block = (
@@ -184,37 +184,29 @@ Return output using ONLY these XML tags and in this order:
             if not compliance_analysis and generated_text.strip():
                 compliance_analysis = generated_text.strip()
 
-            if not naac_requirement and naac_metadata:
-                naac_requirement = f"NAAC context retrieved from {len(naac_metadata)} source(s)."
-
-            if not mvsr_evidence and mvsr_metadata:
-                mvsr_evidence = f"MVSR evidence retrieved from {len(mvsr_metadata)} source(s)."
-
-            primary_criterion = "General"
-            if naac_metadata and naac_metadata[0].get("criterion"):
-                primary_criterion = f"Criterion {naac_metadata[0]['criterion']}"
-                if naac_metadata[0].get("indicator"):
-                    primary_criterion += f".{naac_metadata[0]['indicator']}"
-
+            parse_warnings: List[str] = []
+            if not naac_requirement:
+                parse_warnings.append("Missing <naac_requirement> section in LLM output")
+            if not mvsr_evidence:
+                parse_warnings.append("Missing <mvsr_evidence> section in LLM output")
+            if not naac_mapping:
+                parse_warnings.append("Missing <naac_mapping> section in LLM output")
             if not status:
-                text_lower = generated_text.lower()
-                if any(w in text_lower for w in ["gap", "missing", "lacking", "deficien"]):
-                    status = "Gap Identified"
-                elif any(w in text_lower for w in ["partial", "partially", "some areas"]):
-                    status = "Partially Supported"
-                elif any(w in text_lower for w in ["fully", "meets", "satisfies", "compliant"]):
-                    status = "Fully Supported"
-                else:
-                    status = "Partially Supported"
+                parse_warnings.append("Missing <status> section in LLM output")
+            if not recommendations:
+                parse_warnings.append("Missing <recommendations> section in LLM output")
+
+            query_processed = len(parse_warnings) == 0
 
             return {
                 "naac_requirement": naac_requirement,
                 "mvsr_evidence": mvsr_evidence,
-                "naac_mapping": naac_mapping if naac_mapping else primary_criterion,
+                "naac_mapping": naac_mapping,
                 "compliance_analysis": compliance_analysis,
                 "status": status,
                 "recommendations": recommendations,
-                "query_processed": True,
+                "query_processed": query_processed,
+                "parse_warnings": parse_warnings,
                 "context_sources": {
                     "naac_sources": len(naac_metadata),
                     "mvsr_sources": len(mvsr_metadata),
@@ -227,12 +219,12 @@ Return output using ONLY these XML tags and in this order:
 
     def _get_error_response(self, error_message: str) -> Dict[str, Any]:
         return {
-            "naac_requirement": "Unable to retrieve NAAC requirements",
-            "mvsr_evidence": "Unable to retrieve MVSR evidence",
-            "naac_mapping": "Error in processing",
+            "naac_requirement": "",
+            "mvsr_evidence": "",
+            "naac_mapping": "",
             "compliance_analysis": f"Analysis failed: {error_message}",
             "status": "Processing Error",
-            "recommendations": "Please check system configuration and try again",
+            "recommendations": "",
             "query_processed": False,
             "error": error_message,
         }
@@ -246,9 +238,30 @@ Return output using ONLY these XML tags and in this order:
                 do_sample=False,
                 return_full_text=False,
             )
-            return len(str(response).strip()) > 0
-        except Exception:
-            return False
+            # If the API call succeeded, connectivity is healthy.
+            return response is not None
+        except Exception as text_err:
+            # Some hosted endpoints only support chat/completions.
+            try:
+                chat_response = self.client.chat_completion(
+                    messages=[{"role": "user", "content": "Reply exactly with OK."}],
+                    max_tokens=5,
+                    temperature=0.0,
+                )
+                if not chat_response:
+                    return False
+
+                # Be permissive here: successful chat-completion call means provider is reachable.
+                if getattr(chat_response, "choices", None):
+                    return True
+                return True
+            except Exception as chat_err:
+                logger.debug(
+                    "Hugging Face connectivity test failed for both text and chat APIs: text=%s chat=%s",
+                    text_err,
+                    chat_err,
+                )
+                return False
 
     def get_model_info(self) -> Dict[str, Any]:
         return {

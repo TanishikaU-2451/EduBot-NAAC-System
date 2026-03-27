@@ -14,8 +14,7 @@ from pathlib import Path
 from .naac_watcher import NAACWebsiteWatcher, WatchResult, DocumentInfo
 from .downloader import NAACDocumentDownloader, DownloadResult
 from .version_manager import NAACVersionManager, UpdateOperation
-from ..db.chroma_store import ChromaVectorStore
-from ..ingestion.ingest import DocumentIngestionPipeline
+from ..ingestion.ingest import DocumentIngestionPipeline, VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +61,7 @@ class NAACAutoIngest:
     def __init__(self,
                  data_dir: str = "./data",
                  cache_dir: str = "./cache", 
-                 chroma_store: Optional[ChromaVectorStore] = None,
+                 chroma_store: Optional[VectorStore] = None,
                  ingestion_pipeline: Optional[DocumentIngestionPipeline] = None,
                  config: Optional[Dict[str, Any]] = None):
         """
@@ -71,7 +70,7 @@ class NAACAutoIngest:
         Args:
             data_dir: Base directory for data storage
             cache_dir: Directory for caching
-            chroma_store: ChromaDB vector store
+            chroma_store: Vector store
             ingestion_pipeline: Document ingestion pipeline
             config: Configuration options
         """
