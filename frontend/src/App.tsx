@@ -505,26 +505,29 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
           </section>
 
           <form className="input-dock" onSubmit={handleSend}>
-            <textarea
-              className="chat-input"
-              placeholder="Ask anything about compliance, gaps, or evidence..."
-              value={inputValue}
-              onChange={(event) => setInputValue(event.target.value)}
-              rows={1}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault()
-                  handleSend(event)
-                }
-              }}
-            />
-            <button
-              type="submit"
-              className="chat-send"
-              disabled={!inputValue.trim() || isThinking}
-            >
-              Send
-            </button>
+            <div className="input-box">
+              <textarea
+                className="chat-input"
+                placeholder="Ask anything about compliance, gaps, or evidence..."
+                value={inputValue}
+                onChange={(event) => setInputValue(event.target.value)}
+                rows={1}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault()
+                    handleSend(event)
+                  }
+                }}
+              />
+              <button
+                type="submit"
+                className="chat-send"
+                disabled={!inputValue.trim() || isThinking}
+                title="Send message"
+              >
+                ↑
+              </button>
+            </div>
           </form>
         </div>
       </main>
@@ -590,65 +593,48 @@ const UploadSlot = ({
       onDragOver={(event) => event.preventDefault()}
       onDrop={onDrop}
     >
-      <div className="slot-header">
-        <div>
-          <p className="slot-label">{label}</p>
-          <h3>{document ? document.name : `Choose ${label}`}</h3>
-        </div>
+      <div className="slot-info">
+        <p className="slot-label">{label}</p>
+        {!document ? (
+          <h3 className="slot-empty-text">Drop PDF here or Browse</h3>
+        ) : (
+          <div className="doc-details">
+            <h3 className="doc-name" title={document.name}>{document.name}</h3>
+            <span className="doc-meta-inline">
+              {formatFileSize(document.size)} • {document.statusMessage || (document.status === 'staged' ? 'Ready to upload' : document.status)}
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div className="slot-actions">
+        {document && (
+          <button
+            type="button"
+            className="ghost sm"
+            onClick={(event) => {
+              event.stopPropagation()
+              onPreview()
+            }}
+            title="Preview Document"
+          >
+            👁
+          </button>
+        )}
         {isClearVisible && (
           <button
             type="button"
-            className="icon-button"
-            aria-label={`Clear ${label}`}
+            className="icon-button sm"
             onClick={(event) => {
               event.stopPropagation()
               void onClear()
             }}
+            title="Remove Document"
           >
-            x
+            ✕
           </button>
         )}
       </div>
-
-      {!document && (
-        <>
-          <p className="drop-title">Drag and drop a PDF here</p>
-          <p className="drop-caption">Or browse to stage the file without chunking yet</p>
-          <button
-            type="button"
-            className="ghost"
-            onClick={(event) => {
-              event.stopPropagation()
-              onBrowse()
-            }}
-          >
-            Choose file
-          </button>
-        </>
-      )}
-
-      {document && (
-        <div className="slot-body">
-          <p className="doc-meta">{formatFileSize(document.size)} · {label}</p>
-          <p className="doc-meta">Saved {new Date(document.uploadedAt).toLocaleString()}</p>
-          {document.ingestRequestedAt && (
-            <p className="doc-meta">Upload requested {new Date(document.ingestRequestedAt).toLocaleString()}</p>
-          )}
-          <p className="status-hint">{document.statusMessage}</p>
-          <div className="document-actions">
-            <button
-              className="ghost"
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation()
-                onPreview()
-              }}
-            >
-              View document
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
