@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import hashlib
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -40,8 +41,16 @@ class PDFLoader:
     Handles both NAAC requirement documents and MVSR evidence documents
     """
     
-    def __init__(self):
+    def __init__(
+        self,
+        preferred_extractor: str = "auto",
+        extract_tables: bool = False,
+        large_document_page_threshold: int = 120,
+    ):
         """Initialize PDF loader"""
+        self.preferred_extractor = (preferred_extractor or "auto").strip().lower()
+        self.extract_tables = bool(extract_tables)
+        self.large_document_page_threshold = max(int(large_document_page_threshold or 120), 1)
         self.naac_criterion_patterns = {
             r'criterion\s*[:-]?\s*1\b': '1',
             r'criterion\s*[:-]?\s*2\b': '2', 
@@ -79,21 +88,46 @@ class PDFLoader:
         if not file_path.exists():
             raise FileNotFoundError(f"PDF file not found: {file_path}")
         
-        # Try pdfplumber first (better for complex layouts)
-        try:
-            text, pages = self._extract_with_pdfplumber(file_path)
-            extraction_method = "pdfplumber"
-            logger.info(f"Extracted {len(text)} characters using pdfplumber from {file_path.name}")
-        except Exception as e:
-            logger.warning(f"pdfplumber failed for {file_path.name}: {e}")
+        estimated_pages = self._get_pdf_page_count(file_path)
+        extraction_method = None
+        text = ""
+        pages = estimated_pages
+        last_error = None
+
+        for method in self._choose_extraction_plan(estimated_pages):
+            started = time.time()
             try:
-                # Fallback to PyPDF2
-                text, pages = self._extract_with_pypdf2(file_path)
-                extraction_method = "pypdf2"
-                logger.info(f"Extracted {len(text)} characters using PyPDF2 from {file_path.name}")
-            except Exception as e2:
-                logger.error(f"Both extraction methods failed for {file_path.name}: {e2}")
-                raise
+                if method == "pymupdf":
+                    text, pages = self._extract_with_pymupdf(file_path)
+                elif method == "pdfplumber":
+                    text, pages = self._extract_with_pdfplumber(file_path, extract_tables=self.extract_tables)
+                else:
+                    text, pages = self._extract_with_pypdf2(file_path)
+
+                if self._is_usable_extraction(text, pages):
+                    extraction_method = method
+                    logger.info(
+                        "Extracted %s characters using %s from %s in %.2fs",
+                        len(text),
+                        method,
+                        file_path.name,
+                        time.time() - started,
+                    )
+                    break
+
+                logger.warning(
+                    "%s extraction for %s produced too little text (%s chars); trying fallback",
+                    method,
+                    file_path.name,
+                    len(text),
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning("%s failed for %s: %s", method, file_path.name, exc)
+
+        if extraction_method is None:
+            logger.error("All extraction methods failed for %s: %s", file_path.name, last_error)
+            raise last_error or RuntimeError(f"Could not extract text from {file_path.name}")
         
         # Generate file hash for duplicate detection
         file_hash = self._calculate_file_hash(file_path)
@@ -116,9 +150,10 @@ class PDFLoader:
         
         return text, metadata
     
-    def _extract_with_pdfplumber(self, file_path: Path) -> Tuple[str, int]:
+    def _extract_with_pdfplumber(self, file_path: Path, extract_tables: Optional[bool] = None) -> Tuple[str, int]:
         """Extract text using pdfplumber (handles tables and complex layouts better)"""
         text_parts = []
+        include_tables = self.extract_tables if extract_tables is None else bool(extract_tables)
         
         with pdfplumber.open(file_path) as pdf:
             total_pages = len(pdf.pages)
@@ -131,16 +166,68 @@ class PDFLoader:
                         text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}\n")
                     
                     # Extract tables if present
-                    tables = page.extract_tables()
-                    if tables:
-                        for table_num, table in enumerate(tables):
-                            table_text = self._format_table(table)
-                            text_parts.append(f"--- Table {table_num + 1} on Page {page_num + 1} ---\n{table_text}\n")
+                    if include_tables:
+                        tables = page.extract_tables()
+                        if tables:
+                            for table_num, table in enumerate(tables):
+                                table_text = self._format_table(table)
+                                text_parts.append(f"--- Table {table_num + 1} on Page {page_num + 1} ---\n{table_text}\n")
                 
                 except Exception as e:
                     logger.warning(f"Error extracting page {page_num + 1} from {file_path.name}: {e}")
                     continue
         
+        return "\n".join(text_parts), total_pages
+
+    def _get_pdf_page_count(self, file_path: Path) -> int:
+        """Get PDF page count quickly to decide whether to use the fast path."""
+        with open(file_path, "rb") as file:
+            reader = PyPDF2.PdfReader(file)
+            return len(reader.pages)
+
+    def _choose_extraction_plan(self, total_pages: int) -> List[str]:
+        """Choose the fastest extractor order for the current document size."""
+        has_pymupdf = False
+        try:
+            import fitz
+            has_pymupdf = True
+        except ImportError:
+            pass
+            
+        if has_pymupdf:
+            # PyMuPDF is extremely fast and robust, use it first to handle 300+ pages instantly
+            if total_pages >= self.large_document_page_threshold:
+                return ["pymupdf", "pypdf2"]
+            return ["pymupdf", "pdfplumber", "pypdf2"]
+
+        if self.preferred_extractor in {"fast", "pypdf2"}:
+            return ["pypdf2", "pdfplumber"]
+        if self.preferred_extractor in {"accurate", "pdfplumber"}:
+            return ["pdfplumber", "pypdf2"]
+        if total_pages >= self.large_document_page_threshold:
+            return ["pypdf2", "pdfplumber"]
+        return ["pdfplumber", "pypdf2"]
+
+    def _is_usable_extraction(self, text: str, total_pages: int) -> bool:
+        """Reject empty or clearly broken extraction results before ingestion."""
+        cleaned = re.sub(r"\s+", "", text or "")
+        minimum_chars = max(200, total_pages * 40)
+        return len(cleaned) >= minimum_chars
+
+    def _extract_with_pymupdf(self, file_path: Path) -> Tuple[str, int]:
+        """Lightning fast extraction using PyMuPDF (fitz) for huge docs"""
+        import fitz
+        text_parts = []
+        with fitz.open(str(file_path)) as doc:
+            total_pages = len(doc)
+            for page_num, page in enumerate(doc):
+                try:
+                    page_text = page.get_text()
+                    if page_text:
+                        text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}\n")
+                except Exception as e:
+                    logger.warning(f"Error extracting page {page_num + 1} from {file_path.name}: {e}")
+                    continue
         return "\n".join(text_parts), total_pages
     
     def _extract_with_pypdf2(self, file_path: Path) -> Tuple[str, int]:

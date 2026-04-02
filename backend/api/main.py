@@ -323,6 +323,8 @@ async def initialize_system():
                 embedding_model=settings.embedding_model,
                 embedding_dim=settings.embedding_dim,
                 embedding_device=settings.embedding_device,
+                embedding_batch_size=settings.embedding_batch_size,
+                insert_batch_size=settings.vector_insert_batch_size,
             )
             consolidate = getattr(vector_store, "consolidate_single_row_mode", None)
             if callable(consolidate):
@@ -332,10 +334,11 @@ async def initialize_system():
             vector_store = LocalVectorStore(
                 embedding_model=settings.embedding_model,
                 embedding_device=settings.embedding_device,
+                embedding_batch_size=settings.embedding_batch_size,
             )
         vector_store_instance = vector_store
 
-        if settings.memory_enabled:
+        if settings.memory_enabled and settings.supabase_db_url:
             memory_store = ConversationMemoryStore(
                 db_url=settings.supabase_db_url,
                 embedding_model=settings.embedding_model,
@@ -347,6 +350,7 @@ async def initialize_system():
                 long_top_k=settings.memory_long_top_k,
             )
             memory_store.initialize_schema()
+            memory_store.clear_short_term_memory()
             memory_store_instance = memory_store
         else:
             memory_store_instance = None
@@ -363,6 +367,12 @@ async def initialize_system():
             vector_store=vector_store,
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
+            large_document_page_threshold=settings.large_document_page_threshold,
+            large_document_chunk_size=settings.large_document_chunk_size,
+            large_document_chunk_overlap=settings.large_document_chunk_overlap,
+            min_chunk_length=settings.min_chunk_length,
+            pdf_extraction_strategy=settings.pdf_extraction_strategy,
+            pdf_extract_tables=settings.pdf_extract_tables,
         )
         
         # Initialize RAG pipeline
@@ -474,6 +484,21 @@ def _build_assistant_memory_text(response: Dict[str, Any]) -> str:
     return "\n\n".join([p for p in parts if p])
 
 # API Endpoints
+
+@api_router.post("/auth/login", response_model=LoginResponse)
+async def login_endpoint(request: LoginRequest):
+    """Authenticate and return a session token"""
+    token = authenticate(request.username, request.password)
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    session = get_session_info(token)
+    return LoginResponse(
+        token=token,
+        username=request.username,
+        expires_at=session["expires_at"] if session else "",
+        message="Login successful"
+    )
 
 @api_router.get("/health")
 async def health_check():

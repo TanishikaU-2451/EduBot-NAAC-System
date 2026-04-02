@@ -1,4 +1,5 @@
 import React, { FormEvent, useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
 import apiService, { getErrorMessage } from './services/api'
 import { ComplianceResponse } from './types'
 
@@ -45,13 +46,7 @@ const createId = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2)
 
-const bulletize = (value?: string, fallback?: string[]) => {
-  if (!value) return fallback || []
-  return value
-    .split(/\n+/)
-    .map((line) => line.replace(/^[-*\d.\s]+/, '').trim())
-    .filter(Boolean)
-}
+
 
 const toStatusClass = (value?: string) =>
   value ? value.toLowerCase().replace(/[^a-z]+/g, '-') : 'info'
@@ -642,97 +637,42 @@ const UploadSlot = ({
 const AssistantMessage = ({ message }: { message: ChatMessage }) => {
   if (!message.response) return null
   const { response } = message
-  const summary = bulletize(response.compliance_analysis, ['Analysis unavailable.'])
-  const requirements = bulletize(response.naac_requirement)
-  const evidence = bulletize(response.mvsr_evidence)
-  const recommendations = bulletize(response.recommendations)
+
+  // Logging actual output vs what will be rendered
+  console.log('--- ACTUAL RAW BACKEND RESPONSE ---')
+  console.log(response)
+  console.log('--- DISPLAYED UI TEXT ---')
+  console.log(response.compliance_analysis)
+
+  const complianceScore = response.compliance_score?.overall_score ?? response.confidence_score
 
   return (
     <div className="chat-message message-assistant">
       <div className="message-avatar">AI</div>
       <div className="message-bubble assistant">
-        <div className="assistant-panel">
-          <div className="message-meta">
+        <div className="assistant-panel" style={{ display: 'block' }}>
+          <div className="message-meta" style={{ marginBottom: '1rem' }}>
             <span className={`status-pill status-${toStatusClass(response.status)}`}>
               {response.status || 'Status pending'}
             </span>
-            <span className="timestamp">
+            {complianceScore !== undefined && (
+              <span className="status-pill status-info" style={{ marginLeft: '10px', background: 'var(--bg-card)', color: 'var(--text-secondary)' }}>
+                Compliance: {Math.round(complianceScore * 100)}%
+              </span>
+            )}
+            <span className="timestamp" style={{ marginLeft: 'auto' }}>
               {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </span>
           </div>
 
-          <AssistantSection title="Compliance overview" bullets={summary} />
-          {requirements.length > 0 && (
-            <AssistantSection title="Relevant NAAC notes" bullets={requirements} />
-          )}
-          {evidence.length > 0 && (
-            <AssistantSection title="Referenced MVSR evidence" bullets={evidence} />
-          )}
-          {recommendations.length > 0 && (
-            <AssistantSection title="Suggested next steps" bullets={recommendations} />
-          )}
+          <div className="assistant-single-answer" style={{ 
+            color: 'var(--text-primary)', 
+            lineHeight: '1.6', 
+            fontSize: '15px' 
+          }}>
+            <ReactMarkdown>{response.compliance_analysis || 'Analysis unavailable.'}</ReactMarkdown>
+          </div>
         </div>
-        <InsightDeck response={response} />
-      </div>
-    </div>
-  )
-}
-
-const AssistantSection = ({ title, bullets }: { title: string; bullets: string[] }) => (
-  <div className="assistant-section">
-    <p className="section-title">{title}</p>
-    <ul>
-      {bullets.slice(0, 4).map((item, index) => (
-        <li key={`${title}-${index}`}>{item}</li>
-      ))}
-    </ul>
-  </div>
-)
-
-const InsightDeck = ({ response }: { response: ComplianceResponse }) => {
-  const complianceScore = Math.round(
-    (response.compliance_score?.overall_score ?? response.confidence_score ?? 0) * 100
-  )
-  const highlights = bulletize(response.compliance_analysis).slice(0, 3)
-  const gaps = response.compliance_score?.gap_analysis?.slice(0, 3) || []
-  const suggestions = bulletize(response.recommendations).slice(0, 3)
-
-  return (
-    <div className="insight-grid">
-      <div
-        className="insight-card insight-score"
-        style={{ ['--score-width' as any]: `${Math.min(complianceScore, 100)}%`, animationDelay: '0ms' }}
-      >
-        <p className="section-title">Compliance score</p>
-        <p className="score-value">{isNaN(complianceScore) ? '-' : `${complianceScore}%`}</p>
-        <div className="score-bar" />
-      </div>
-
-      <div className="insight-card" style={{ animationDelay: '80ms' }}>
-        <p className="section-title">Key highlights</p>
-        <ul>
-          {(highlights.length ? highlights : ['No distinct highlights extracted yet.']).map((item, index) => (
-            <li key={`highlight-${index}`}>{item}</li>
-          ))}
-        </ul>
-      </div>
-
-      <div className="insight-card" style={{ animationDelay: '160ms' }}>
-        <p className="section-title">Missing sections</p>
-        <ul>
-          {(gaps.length ? gaps : ['No explicit gaps detected.']).map((item, index) => (
-            <li key={`gap-${index}`}>{item}</li>
-          ))}
-        </ul>
-      </div>
-
-      <div className="insight-card" style={{ animationDelay: '240ms' }}>
-        <p className="section-title">Recommendations</p>
-        <ul>
-          {(suggestions.length ? suggestions : ['Awaiting more details.']).map((item, index) => (
-            <li key={`suggestion-${index}`}>{item}</li>
-          ))}
-        </ul>
       </div>
     </div>
   )

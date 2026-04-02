@@ -5,6 +5,7 @@ Orchestrates PDF loading, chunking, and vector store ingestion
 
 import hashlib
 import json
+import re
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,12 @@ class DocumentIngestionPipeline:
         vector_store: VectorStore,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
+        large_document_page_threshold: int = 120,
+        large_document_chunk_size: Optional[int] = None,
+        large_document_chunk_overlap: Optional[int] = None,
+        min_chunk_length: int = 180,
+        pdf_extraction_strategy: str = "auto",
+        pdf_extract_tables: bool = False,
     ):
         """
         Initialize ingestion pipeline
@@ -48,10 +55,27 @@ class DocumentIngestionPipeline:
             chunk_overlap: Overlap between consecutive chunks
         """
         self.vector_store = vector_store
-        self.pdf_loader = PDFLoader()
+        self.large_document_page_threshold = max(int(large_document_page_threshold or 120), 1)
+        self.min_chunk_length = max(int(min_chunk_length or 180), 50)
+
+        self.pdf_loader = PDFLoader(
+            preferred_extractor=pdf_extraction_strategy,
+            extract_tables=pdf_extract_tables,
+            large_document_page_threshold=self.large_document_page_threshold,
+        )
         self.chunker = DocumentChunker(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+        )
+        self.large_document_chunker = DocumentChunker(
+            chunk_size=max(int(large_document_chunk_size or max(chunk_size, 1800)), chunk_size),
+            chunk_overlap=max(
+                0,
+                min(
+                    int(large_document_chunk_overlap or min(chunk_overlap, 120)),
+                    max(int(large_document_chunk_size or max(chunk_size, 1800)) - 1, 0),
+                ),
+            ),
         )
 
         # Track ingested documents to avoid duplicates
@@ -427,7 +451,9 @@ class DocumentIngestionPipeline:
 
     def _chunk_with_fallback(self, text: str, base_metadata: Dict[str, Any]) -> List[TextChunk]:
         """Chunk text and fallback to one cleaned chunk when structural chunking yields none."""
-        chunks = self.chunker.chunk_document(text, base_metadata)
+        total_pages = int(base_metadata.get("total_pages", 1) or 1)
+        chunker = self.large_document_chunker if total_pages >= self.large_document_page_threshold else self.chunker
+        chunks = chunker.chunk_document(text, base_metadata)
         if chunks:
             return chunks
 
@@ -435,7 +461,6 @@ class DocumentIngestionPipeline:
         if not cleaned_text:
             return []
 
-        total_pages = int(base_metadata.get("total_pages", 1) or 1)
         return [
             TextChunk(
                 text=cleaned_text,
@@ -455,10 +480,21 @@ class DocumentIngestionPipeline:
         """Convert chunk objects into vector-store row payloads."""
         documents: List[str] = []
         metadatas: List[Dict[str, Any]] = []
+        seen_documents = set()
 
         for chunk in chunks:
-            documents.append(chunk.text)
-            metadatas.append(self._build_chunk_metadata(base_metadata, chunk))
+            cleaned_text = self._clean_chunk_text(chunk.text)
+            if len(cleaned_text) < self.min_chunk_length:
+                continue
+            if cleaned_text in seen_documents:
+                continue
+
+            seen_documents.add(cleaned_text)
+            documents.append(cleaned_text)
+
+            metadata = self._build_chunk_metadata(base_metadata, chunk)
+            metadata["chunk_length"] = len(cleaned_text)
+            metadatas.append(metadata)
 
         return documents, metadatas
 
@@ -476,7 +512,48 @@ class DocumentIngestionPipeline:
                 "source_file": merged.get("source_file") or merged.get("file_name", ""),
             }
         )
+        merged["section_header"] = self._derive_section_header(chunk, merged)
         return merged
+
+    def _clean_chunk_text(self, text: str) -> str:
+        """Remove page markers and noisy whitespace before embedding."""
+        cleaned = text or ""
+        cleaned = re.sub(r"---\s*Page\s+\d+\s*---", " ", cleaned)
+        cleaned = re.sub(r"---\s*Table\s+\d+\s+on\s+Page\s+\d+\s*---", " ", cleaned)
+        cleaned = cleaned.replace("\uf0b7", " ")
+        cleaned = cleaned.replace("â€¢", " ")
+        cleaned = cleaned.replace("Â·", " ")
+        cleaned = cleaned.replace("\u2022", " ")
+        cleaned = " ".join(cleaned.split())
+        return cleaned.strip()
+
+    def _derive_section_header(self, chunk: TextChunk, metadata: Dict[str, Any]) -> str:
+        """Build a non-empty section header required by the database schema."""
+        existing = str(metadata.get("section_header", "") or "").strip()
+        if existing:
+            return existing[:200]
+
+        chunk_lines = [line.strip() for line in (chunk.text or "").splitlines()]
+        for line in chunk_lines:
+            if not line:
+                continue
+            if re.match(r"^---\s*(?:Page|Table)\b", line, re.IGNORECASE):
+                continue
+            if len(line) < 3:
+                continue
+            compact = re.sub(r"\s+", " ", line).strip(" -:|")
+            if compact:
+                return compact[:200]
+
+        document_title = str(metadata.get("document_title", "") or "").strip()
+        if document_title:
+            return document_title[:200]
+
+        source_file = str(metadata.get("source_file") or metadata.get("file_name") or "").strip()
+        if source_file:
+            return Path(source_file).stem[:200]
+
+        return f"{chunk.chunk_type.title()} section p{chunk.start_page}-{chunk.end_page}"
 
     def _is_document_ingested(self, file_path: Path, document_type: str) -> bool:
         """Check if document was already ingested."""

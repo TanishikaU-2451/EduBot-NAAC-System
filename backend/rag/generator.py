@@ -99,13 +99,19 @@ class ComplianceGenerator:
         
         documents = []
         metadatas = []
+        source_counts: Dict[str, int] = {}
         
         for doc, meta, distance in sorted_data:
             # Clean and prepare document text
             cleaned_doc = self._clean_document_text(doc)
+            source_key = self._source_key(meta)
+            if source_key and source_counts.get(source_key, 0) >= 2:
+                continue
             
             if len(cleaned_doc) > 50:  # Skip very short fragments
                 documents.append(cleaned_doc)
+                if source_key:
+                    source_counts[source_key] = source_counts.get(source_key, 0) + 1
                 
                 # Prepare metadata for generation
                 prepared_meta = {
@@ -113,6 +119,7 @@ class ComplianceGenerator:
                     'indicator': meta.get('indicator', 'N/A'),
                     'version': meta.get('version', 'N/A'),
                     'document_title': meta.get('document_title', 'NAAC Document'),
+                    'section_header': meta.get('section_header', 'N/A'),
                     'source_file': meta.get('source_file', meta.get('file_name', 'N/A')),
                     'chunk_index': meta.get('chunk_index', 'N/A'),
                     'start_page': meta.get('start_page', 'N/A'),
@@ -139,13 +146,19 @@ class ComplianceGenerator:
         
         documents = []
         metadatas = []
+        source_counts: Dict[str, int] = {}
         
         for doc, meta, distance in sorted_data:
             # Clean and prepare document text
             cleaned_doc = self._clean_document_text(doc)
+            source_key = self._source_key(meta)
+            if source_key and source_counts.get(source_key, 0) >= 3:
+                continue
             
             if len(cleaned_doc) > 50:  # Skip very short fragments
                 documents.append(cleaned_doc)
+                if source_key:
+                    source_counts[source_key] = source_counts.get(source_key, 0) + 1
                 
                 # Prepare metadata for generation
                 prepared_meta = {
@@ -153,6 +166,7 @@ class ComplianceGenerator:
                     'year': meta.get('year', 'N/A'),
                     'category': meta.get('category', 'N/A'),
                     'mapped_criterion': meta.get('criterion', 'N/A'),
+                    'section_header': meta.get('section_header', 'N/A'),
                     'source_file': meta.get('source_file', meta.get('file_name', 'N/A')),
                     'chunk_index': meta.get('chunk_index', 'N/A'),
                     'start_page': meta.get('start_page', 'N/A'),
@@ -176,6 +190,16 @@ class ComplianceGenerator:
         cleaned = re.sub(r'--- Table \d+ on Page \d+ ---', '', cleaned)
         
         return cleaned.strip()
+
+    def _source_key(self, meta: Dict[str, Any]) -> str:
+        """Group chunks by source file so one document does not dominate the prompt."""
+        return str(
+            meta.get('source_file')
+            or meta.get('file_name')
+            or meta.get('document_title')
+            or meta.get('document')
+            or ''
+        ).strip().lower()
     
     def _truncate_context(self, 
                         naac_context: List[str], 

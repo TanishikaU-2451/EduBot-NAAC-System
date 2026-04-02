@@ -38,11 +38,16 @@ class Settings(BaseSettings):
     # Embedding settings
     embedding_model: str = Field("all-MiniLM-L6-v2", env="EMBEDDING_MODEL")
     embedding_device: str = Field("cpu", env="EMBEDDING_DEVICE")  # cpu or cuda
+    embedding_batch_size: int = Field(128, env="EMBEDDING_BATCH_SIZE")
+    vector_insert_batch_size: int = Field(1000, env="VECTOR_INSERT_BATCH_SIZE")
     
     # Document processing settings
     data_directory: str = Field("./data", env="DATA_DIRECTORY")
     cache_directory: str = Field("./cache", env="CACHE_DIRECTORY")
     uploads_directory: str = Field("./uploads", env="UPLOADS_DIRECTORY")
+    pdf_extraction_strategy: str = Field("auto", env="PDF_EXTRACTION_STRATEGY")
+    pdf_extract_tables: bool = Field(False, env="PDF_EXTRACT_TABLES")
+    large_document_page_threshold: int = Field(120, env="LARGE_DOCUMENT_PAGE_THRESHOLD")
     
     # NAAC website monitoring
     naac_base_url: str = Field("https://www.naac.gov.in", env="NAAC_BASE_URL")
@@ -52,6 +57,9 @@ class Settings(BaseSettings):
     # Chunking parameters
     chunk_size: int = Field(1000, env="CHUNK_SIZE")
     chunk_overlap: int = Field(200, env="CHUNK_OVERLAP")
+    large_document_chunk_size: int = Field(1800, env="LARGE_DOCUMENT_CHUNK_SIZE")
+    large_document_chunk_overlap: int = Field(120, env="LARGE_DOCUMENT_CHUNK_OVERLAP")
+    min_chunk_length: int = Field(180, env="MIN_CHUNK_LENGTH")
     
     # Retrieval parameters
     max_retrieval_results: int = Field(10, env="MAX_RETRIEVAL_RESULTS")
@@ -89,7 +97,7 @@ class Settings(BaseSettings):
     memory_long_top_k: int = Field(6, env="MEMORY_LONG_TOP_K")
     
     class Config:
-        env_file = ".env"
+        env_file = (".env", "../.env")
         env_file_encoding = "utf-8"
         extra = "ignore"  # Allow extra fields in environment
     

@@ -5,7 +5,12 @@ create table public.chunks (
   content text not null,
   metadata jsonb not null,
   embedding vector(384) not null,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  constraint ck_chunks_section_header check (
+    jsonb_typeof(metadata) = 'object'
+    and metadata ? 'section_header'
+    and btrim(coalesce(metadata->>'section_header', '')) <> ''
+  )
 );
 create index on public.chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
 create index on public.chunks(doc_type);

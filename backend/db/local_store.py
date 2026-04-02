@@ -28,7 +28,9 @@ class LocalVectorStore:
         self,
         embedding_model: str = "all-MiniLM-L6-v2",
         embedding_device: str = "cpu",
+        embedding_batch_size: int = 128,
     ) -> None:
+        self.embedding_batch_size = max(int(embedding_batch_size or 128), 8)
         self.embedder = SentenceTransformer(embedding_model, device=embedding_device)
         self.naac_records: List[_VectorRecord] = []
         self.mvsr_records: List[_VectorRecord] = []
@@ -138,4 +140,11 @@ class LocalVectorStore:
         return {"documents": documents, "metadatas": metadatas, "distances": distances}
 
     def _encode(self, texts: List[str]) -> np.ndarray:
-        return np.asarray(self.embedder.encode(texts, normalize_embeddings=True))
+        return np.asarray(
+            self.embedder.encode(
+                texts,
+                normalize_embeddings=True,
+                batch_size=self.embedding_batch_size,
+                show_progress_bar=False,
+            )
+        )

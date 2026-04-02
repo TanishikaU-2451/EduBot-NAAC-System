@@ -44,14 +44,23 @@ class HuggingFaceClient:
             user_query, naac_context, mvsr_context, naac_metadata, mvsr_metadata, memory_context
         )
 
+        logger.info("\n" + "="*50 + "\n[LLM DEBUG] System Context:\n" + "="*50)
+        logger.info(f"Query: {user_query}")
+        logger.info(f"NAAC Chunks: {len(naac_context)}")
+        logger.info(f"MVSR Chunks: {len(mvsr_context)}")
+        logger.info("—" * 50)
+        logger.debug(f"[LLM DEBUG] Full Prompt sent to Hugging Face:\n{prompt}\n" + "="*50)
+
         try:
             # Prefer text-generation; if the endpoint only supports conversational, fall back.
             generated_text = self.client.text_generation(
                 prompt,
-                max_new_tokens=700,
-                temperature=0.1,
-                top_p=0.9,
-                do_sample=True,
+                max_new_tokens=1800,
+                temperature=0.0,
+                do_sample=False,
+                repetition_penalty=1.12,
+                frequency_penalty=0.4,
+                seed=42,
                 return_full_text=False,
             )
 
@@ -69,9 +78,11 @@ class HuggingFaceClient:
                 try:
                     chat_response = self.client.chat_completion(
                         messages=[{"role": "user", "content": prompt}],
-                        max_tokens=700,
-                        temperature=0.1,
+                        max_tokens=1800,
+                        temperature=0.0,
                         top_p=0.9,
+                        frequency_penalty=0.4,
+                        seed=42,
                     )
                     # chat_response.choices[0].message['content'] in HF client
                     generated_text = chat_response.choices[0].message["content"] if chat_response and chat_response.choices else ""

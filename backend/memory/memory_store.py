@@ -294,6 +294,16 @@ class ConversationMemoryStore:
                 "latency_ms": round((time.time() - started) * 1000, 2),
             }
 
+    def clear_short_term_memory(self) -> None:
+        """Clear all short-term conversation memory (used on backend startup)."""
+        logger.info("Clearing short-term conversation memory table.")
+        try:
+            with self._get_connection() as conn, conn.cursor() as cur:
+                cur.execute(f"TRUNCATE TABLE {self.short_table};")
+            logger.info("Short-term memory cleared.")
+        except Exception as e:
+            logger.error("Failed to clear short-term memory: %s", e)
+
     def _metadata_to_dict(self, metadata: Any) -> Dict[str, Any]:
         if isinstance(metadata, dict):
             return metadata

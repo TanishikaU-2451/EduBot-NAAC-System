@@ -214,6 +214,12 @@ class ComplianceRetriever:
                 filtered_docs.append(documents[i])
                 filtered_metadatas.append(metadatas[i])
                 filtered_distances.append(distances[i])
+
+        filtered_docs, filtered_metadatas, filtered_distances = self._deduplicate_results(
+            filtered_docs,
+            filtered_metadatas,
+            filtered_distances,
+        )
         
         logger.debug(f"Filtered {len(documents)} -> {len(filtered_docs)} results by similarity threshold")
         
@@ -244,19 +250,87 @@ class ComplianceRetriever:
             lexical_similarity = self._lexical_overlap_score(query_tokens, self._tokenize_text(doc))
             hybrid_score = (dense_weight * dense_similarity) + (lexical_weight * lexical_similarity)
 
-            # Keep similarity threshold gating behavior aligned with existing retriever logic.
-            if hybrid_score >= self.similarity_threshold:
-                scored_rows.append((hybrid_score, doc, meta, dist))
+            # We DO NOT apply the similarity threshold again here!
+            # It unfairly punishes documents with 0 exact keyword overlap despite dense hits.
+            scored_rows.append((hybrid_score, doc, meta, dist))
 
         scored_rows.sort(key=lambda item: item[0], reverse=True)
         top_rows = scored_rows[:top_k]
 
+        documents, metadatas, distances = self._deduplicate_results(
+            [row[1] for row in top_rows],
+            [row[2] for row in top_rows],
+            [row[3] for row in top_rows],
+        )
+
         return RetrievalResult(
-            documents=[row[1] for row in top_rows],
-            metadatas=[row[2] for row in top_rows],
-            distances=[row[3] for row in top_rows],
+            documents=documents,
+            metadatas=metadatas,
+            distances=distances,
             source_type=candidates.source_type,
         )
+
+    def _deduplicate_results(
+        self,
+        documents: List[str],
+        metadatas: List[Dict[str, Any]],
+        distances: List[float],
+    ) -> Tuple[List[str], List[Dict[str, Any]], List[float]]:
+        """Remove duplicate and near-duplicate retrieval hits."""
+        unique_docs: List[str] = []
+        unique_metadatas: List[Dict[str, Any]] = []
+        unique_distances: List[float] = []
+        seen_doc_fingerprints = set()
+        seen_section_fingerprints = set()
+
+        for doc, meta, distance in zip(documents, metadatas, distances):
+            doc_fingerprint = self._document_fingerprint(doc)
+            section_fingerprint = self._section_fingerprint(meta)
+
+            if doc_fingerprint and doc_fingerprint in seen_doc_fingerprints:
+                continue
+            if section_fingerprint and section_fingerprint in seen_section_fingerprints:
+                continue
+
+            if doc_fingerprint:
+                seen_doc_fingerprints.add(doc_fingerprint)
+            if section_fingerprint:
+                seen_section_fingerprints.add(section_fingerprint)
+
+            unique_docs.append(doc)
+            unique_metadatas.append(meta)
+            unique_distances.append(distance)
+
+        return unique_docs, unique_metadatas, unique_distances
+
+    def _document_fingerprint(self, text: str) -> str:
+        """Build a stable text fingerprint to collapse near-identical chunks."""
+        normalized = re.sub(r"\s+", " ", (text or "").lower()).strip()
+        normalized = re.sub(r"[^a-z0-9 ]+", "", normalized)
+        return normalized[:240]
+
+    def _section_fingerprint(self, metadata: Dict[str, Any]) -> str:
+        """Build a metadata-based fingerprint for logical section deduplication."""
+        source = str(
+            metadata.get("source_file")
+            or metadata.get("file_name")
+            or metadata.get("document_title")
+            or metadata.get("document")
+            or ""
+        ).strip().lower()
+        header = str(
+            metadata.get("section_header")
+            or metadata.get("document_title")
+            or metadata.get("document")
+            or ""
+        ).strip().lower()
+        start_page = metadata.get("start_page")
+        end_page = metadata.get("end_page")
+
+        if not source and not header:
+            return ""
+
+        return f"{source}|{header}|{start_page}|{end_page}"
 
     def _tokenize_text(self, text: str) -> List[str]:
         """Simple normalized tokenizer tuned for rule/condition-style queries."""

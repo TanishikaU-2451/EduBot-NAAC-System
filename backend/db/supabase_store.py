@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
-from psycopg2.extras import Json, execute_batch
+from psycopg2.extras import Json, execute_values
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,8 @@ class SupabaseVectorStore:
         embedding_model: str = "all-MiniLM-L6-v2",
         embedding_dim: int = 384,
         embedding_device: str = "cpu",
+        embedding_batch_size: int = 128,
+        insert_batch_size: int = 1000,
     ):
         if not db_url:
             raise ValueError("SUPABASE_DB_URL is required for SupabaseVectorStore")
@@ -33,6 +35,8 @@ class SupabaseVectorStore:
         self.db_url = db_url
         self.table_name = table_name
         self.embedding_dim = embedding_dim
+        self.embedding_batch_size = max(int(embedding_batch_size or 128), 8)
+        self.insert_batch_size = max(int(insert_batch_size or 1000), 100)
         self.embedder = SentenceTransformer(embedding_model, device=embedding_device)
 
         logger.info(
@@ -191,7 +195,12 @@ class SupabaseVectorStore:
             return
 
         contents = [row[0] for row in rows_to_insert]
-        embeddings = self.embedder.encode(contents, normalize_embeddings=False)
+        embeddings = self.embedder.encode(
+            contents,
+            normalize_embeddings=False,
+            batch_size=self.embedding_batch_size,
+            show_progress_bar=False,
+        )
 
         with self._get_connection() as conn, conn.cursor() as cur:
             # Remove legacy single-row records for this doc type.
@@ -246,14 +255,15 @@ class SupabaseVectorStore:
                     )
                 )
 
-            execute_batch(
+            execute_values(
                 cur,
                 f"""
                 INSERT INTO {self.table_name} (doc_type, content, metadata, embedding)
-                VALUES (%s, %s, %s, %s::vector)
+                VALUES %s
                 """,
                 insert_rows,
-                page_size=200,
+                template="(%s, %s, %s, %s::vector)",
+                page_size=self.insert_batch_size,
             )
             conn.commit()
 
