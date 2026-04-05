@@ -30,10 +30,10 @@ class Settings(BaseSettings):
     supabase_table: str = Field("chunks", env="SUPABASE_TABLE")
     embedding_dim: int = Field(384, env="EMBEDDING_DIM")
     
-    # Hugging Face Inference API settings
-    hf_model: str = Field("meta-llama/Meta-Llama-3.1-8B-Instruct", env="HF_MODEL")
-    hf_api_token: Optional[str] = Field(None, env="HF_API_TOKEN")
-    hf_timeout: int = Field(120, env="HF_TIMEOUT")
+    # Groq API settings
+    groq_model: str = Field("llama-3.3-70b-versatile", env="GROQ_MODEL")
+    groq_api_key: Optional[str] = Field(None, env="GROQ_API_KEY")
+    groq_timeout: int = Field(120, env="GROQ_TIMEOUT")
     
     # Embedding settings
     embedding_model: str = Field("all-MiniLM-L6-v2", env="EMBEDDING_MODEL")

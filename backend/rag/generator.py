@@ -1,6 +1,6 @@
 """
 RAG Generator Component for NAAC Compliance Intelligence System
-Handles response generation using retrieved context and Hugging Face LLM
+Handles response generation using retrieved context and Groq LLM
 """
 
 from typing import Dict, Any, List, Optional, Tuple
@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass
 import json
 
-from ..llm.huggingface_client import HuggingFaceClient
+from ..llm.groq_client import GroqClient
 from .retriever import RetrievalResult
 
 logger = logging.getLogger(__name__)
@@ -28,13 +28,13 @@ class ComplianceGenerator:
     """
     
     def __init__(self, 
-                 llm_client: HuggingFaceClient,
+                 llm_client: GroqClient,
                  max_context_length: int = 8000):
         """
         Initialize the generator
         
         Args:
-            llm_client: Hugging Face client for LLM interaction
+            llm_client: Groq client for LLM interaction
             max_context_length: Maximum context length to send to LLM
         """
         self.llm_client = llm_client

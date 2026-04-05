@@ -17,8 +17,8 @@ This is **NOT a generic chatbot** but a specialized compliance intelligence syst
 ### Backend Components
 - **FastAPI REST API**: Orchestrates ingestion, retrieval, scheduling, and monitoring through HTTP endpoints
 - **Supabase PostgreSQL + pgvector store**: Maintains NAAC requirements and MVSR evidence as aggregated vectors (see `db_schema.txt`) to support hybrid similarity search
-- **HuggingFace Inference API**: Hosts the Llama3-style conversational model that generates structured compliance analysis
-- **RAG Pipeline**: Combines Supabase retrieval with HuggingFace generation plus metadata mapping and scoring
+- **Groq API**: Hosts the Llama 70B conversational model that generates structured compliance analysis
+- **RAG Pipeline**: Combines Supabase retrieval with Groq generation plus metadata mapping and scoring
 - **Auto-Update Engine**: Web scraping, document detection, and scheduled ingestion of new NAAC releases
 - **Scheduler System**: APScheduler backed by a SQLite job store with endpoints for pause/resume/manage
 - **Document Processing**: PDF/text chunking, cleaning, and single-row consolidation before vector upsert
@@ -41,7 +41,7 @@ This is **NOT a generic chatbot** but a specialized compliance intelligence syst
 
 ### Required Services
 - **Supabase**: PostgreSQL project with the `vector` extension enabled and a `chunks` table that matches `db_schema.txt`. Set `SUPABASE_DB_URL` and `SUPABASE_TABLE` to connect.
-- **HuggingFace Inference API**: Provides the LLM endpoint (default `meta-llama/Meta-Llama-3.1-8B-Instruct`). Acquire an `HF_API_TOKEN` and keep it secret.
+- **Groq API**: Provides the LLM endpoint (default `llama-3.3-70b-versatile`). Acquire a `GROQ_API_KEY` and keep it secret.
 
 ## 🚀 Quick Start Guide
 
@@ -51,12 +51,12 @@ This is **NOT a generic chatbot** but a specialized compliance intelligence syst
    - Create or reuse a Supabase project, enable the `vector` extension, and run the SQL in `db_schema.txt` to create `public.chunks`.
    - Copy the generated connection string (should include `postgresql://` and your credentials) and set it as `SUPABASE_DB_URL`.
    - Confirm `SUPABASE_TABLE` exists (default: `chunks`) and contains at least one row after a startup ingest.
-2. **HuggingFace Inference**
-   - Sign up at HuggingFace, navigate to your account settings, and create an **Inference API token**.
-   - Set `HF_API_TOKEN` in `.env` and ensure `HF_MODEL` points to your preferred model (default `meta-llama/Meta-Llama-3.1-8B-Instruct`).
+2. **Groq API**
+   - Sign up at Groq and create an API key.
+   - Set `GROQ_API_KEY` in `.env` and ensure `GROQ_MODEL` points to your preferred model (default `llama-3.3-70b-versatile`).
 3. **Verify connectivity**
    - Supabase: run a simple `psql` query or use the Supabase UI to SELECT from `public.chunks`.
-   - HuggingFace: `curl -H "Authorization: Bearer $HF_API_TOKEN" https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3.1-8B-Instruct | jq .`
+   - Groq: `curl https://api.groq.com/openai/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer $GROQ_API_KEY" -d "{\"model\":\"llama-3.3-70b-versatile\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply exactly with OK.\"}],\"max_tokens\":5,\"temperature\":0}"`
 
 ### 2. Clone and Setup Backend
 
@@ -115,10 +115,10 @@ SUPABASE_DB_URL=postgresql://user:password@db.supabase.co:5432/postgres
 SUPABASE_TABLE=chunks
 JOB_STORE_URL=sqlite:///jobs.sqlite
 
-# HuggingFace Inference
-HF_MODEL=meta-llama/Meta-Llama-3.1-8B-Instruct
-HF_API_TOKEN=hf_xxx-your-token-xxx
-HF_TIMEOUT=120
+# Groq API
+GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_API_KEY=
+GROQ_TIMEOUT=120
 
 # Embedding Configuration
 EMBEDDING_MODEL=all-MiniLM-L6-v2
@@ -175,7 +175,7 @@ npm start
 ### 7. Verify Installation
 
 1. **Check Supabase**: Use the Supabase dashboard (or a `SELECT` query) to confirm `public.chunks` exists and contains at least one document after ingestion.
-2. **Check HuggingFace**: Run `curl -H "Authorization: Bearer $HF_API_TOKEN" https://api-inference.huggingface.co/models/$HF_MODEL | jq .model_id` to ensure the token/model pair responds.
+2. **Check Groq**: Run the Groq curl command above to ensure the key/model pair responds.
 3. **Check Backend**: Visit `http://localhost:8000/health` (should show system health)
 4. **Check Frontend**: Visit `http://localhost:3000` (should show chat interface)
 
@@ -298,12 +298,12 @@ psql "$SUPABASE_DB_URL" -c "SELECT tablename FROM pg_tables WHERE tablename='chu
 psql "$SUPABASE_DB_URL" -c "SELECT indexname FROM pg_indexes WHERE tablename='chunks';"
 ```
 
-#### 2. HuggingFace Inference error
+#### 2. Groq API error
 ```bash
-# Verify token + model combination
-curl -H "Authorization: Bearer $HF_API_TOKEN" https://api-inference.huggingface.co/models/$HF_MODEL
+# Verify key + model combination
+curl https://api.groq.com/openai/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer $GROQ_API_KEY" -d "{\"model\":\"$GROQ_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply exactly with OK.\"}],\"max_tokens\":5,\"temperature\":0}"
 
-# If you hit rate limits, try `HF_TIMEOUT=300` or upgrade your plan
+# If you hit rate limits, try `GROQ_TIMEOUT=300` or upgrade your plan
 ```
 
 #### 3. Package Installation Issues
@@ -312,7 +312,7 @@ curl -H "Authorization: Bearer $HF_API_TOKEN" https://api-inference.huggingface.
 pip install --upgrade pip setuptools wheel
 
 # Install packages one by one to identify issues
-pip install fastapi uvicorn psycopg2-binary sentence-transformers huggingface-hub
+pip install fastapi uvicorn psycopg2-binary sentence-transformers groq
 
 # For specific package conflicts:
 pip install --no-deps <package-name>

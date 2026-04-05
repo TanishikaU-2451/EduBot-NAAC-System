@@ -11,6 +11,7 @@ pydantic-settings==2.2.1
 sentence-transformers==2.7.0
 
 # LLM Integration
+groq>=0.18.0
 huggingface-hub==0.33.4
 requests==2.31.0
 

@@ -16,7 +16,7 @@ from typing import Protocol
 class VectorStore(Protocol):
     def query_naac_requirements(self, query_text: str, n_results: int = 5, criterion_filter: str | None = None) -> Dict[str, Any]: ...
     def query_mvsr_evidence(self, query_text: str, n_results: int = 5, category_filter: str | None = None) -> Dict[str, Any]: ...
-from ..llm.huggingface_client import HuggingFaceClient
+from ..llm.groq_client import GroqClient
 from .retriever import ComplianceRetriever, RetrievalResult
 from .generator import ComplianceGenerator, GenerationContext
 from .reranker import ComplianceReranker, RerankerConfig
@@ -40,7 +40,7 @@ class RAGPipeline:
     
     def __init__(self, 
                  chroma_store: VectorStore,
-                 llm_client: HuggingFaceClient,
+                 llm_client: GroqClient,
                  retrieval_config: Optional[Dict[str, Any]] = None):
         """
         Initialize RAG pipeline
@@ -447,7 +447,7 @@ class RAGPipeline:
             health_status['llm'] = {
                 'status': 'healthy' if llm_test else 'error',
                 'connection': llm_test,
-                'provider': 'huggingface-inference-api'
+                'provider': 'groq'
             }
             if not llm_test:
                 health_status['overall_status'] = 'degraded'

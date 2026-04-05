@@ -34,7 +34,7 @@ except Exception as import_exc:  # pragma: no cover - optional dependency
     SUPABASE_IMPORT_ERROR = import_exc
 
 from ..db.local_store import LocalVectorStore
-from ..llm.huggingface_client import HuggingFaceClient
+from ..llm.groq_client import GroqClient
 from ..memory.memory_store import ConversationMemoryStore, MemoryIdentity
 from ..ingestion.ingest import DocumentIngestionPipeline
 from ..updater.auto_ingest import NAACAutoIngest
@@ -355,11 +355,12 @@ async def initialize_system():
         else:
             memory_store_instance = None
         
-        # Initialize Hugging Face client
-        llm_client = HuggingFaceClient(
-            model_name=settings.hf_model,
-            api_token=settings.hf_api_token,
-            timeout=settings.hf_timeout,
+        # Initialize Groq client
+        llm_client = GroqClient(
+            model_name=settings.groq_model,
+            api_key=settings.groq_api_key,
+            timeout=settings.groq_timeout,
+            allow_missing_api_key=True,
         )
         
         # Initialize ingestion pipeline
