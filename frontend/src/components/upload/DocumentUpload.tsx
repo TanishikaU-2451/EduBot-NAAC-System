@@ -38,6 +38,9 @@ const labels: Record<DocumentType, string> = {
   mvsr_evidence: 'MVSR Evidence',
 }
 
+const formatDocumentCountMessage = (count: number) =>
+  count === 1 ? '1 document' : `${count} documents`
+
 const DocumentUpload: React.FC = () => {
   const [filesByType, setFilesByType] = useState<Record<DocumentType, StagedFile | null>>({
     naac_requirement: null,
@@ -131,6 +134,7 @@ const DocumentUpload: React.FC = () => {
 
     setBanner(null)
     setIsStartingUpload(true)
+    const stagedCount = stagedFiles.length
 
     const results = await Promise.all(
       stagedFiles.map(async ([documentType, stagedFile]) => {
@@ -157,7 +161,7 @@ const DocumentUpload: React.FC = () => {
               ? {
                   ...prev[documentType]!,
                   status: 'queued',
-                  message: response.message || 'Chunking started in the background.',
+                  message: `${labels[documentType]} processing started in the background.`,
                   requestedAt: response.timestamp,
                 }
               : prev[documentType],
@@ -185,7 +189,13 @@ const DocumentUpload: React.FC = () => {
     if (firstError) {
       setBanner({ severity: 'error', text: firstError })
     } else {
-      setBanner({ severity: 'success', text: 'Upload started. Chunking is now running in the background.' })
+      setBanner({
+        severity: 'success',
+        text:
+          stagedCount === 1
+            ? 'Upload started. 1 document is now processing in the background.'
+            : `Upload started. ${formatDocumentCountMessage(stagedCount)} are now processing in the background.`,
+      })
     }
 
     setIsStartingUpload(false)
