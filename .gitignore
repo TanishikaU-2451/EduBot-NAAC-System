@@ -150,3 +150,5 @@ celerybeat-schedule
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+ingestion_log.json
