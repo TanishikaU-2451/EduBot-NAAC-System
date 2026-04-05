@@ -343,9 +343,6 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
     )
 
     const firstError = results.find(Boolean)
-<<<<<<< HEAD
-    if (firstError) setToast(firstError)
-=======
     if (firstError) {
       setToast(firstError)
     } else {
@@ -355,7 +352,6 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
           : `Started processing ${formatDocumentCountMessage(stagedCount)} in the background.`
       )
     }
->>>>>>> d719c0706f6effc10fe0355770ebe253fb14637f
 
     setIsUploadStarting(false)
   }
