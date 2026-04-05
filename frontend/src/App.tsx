@@ -58,6 +58,9 @@ const formatFileSize = (size: number) => {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
+const formatDocumentCountMessage = (count: number) =>
+  count === 1 ? '1 document' : `${count} documents`
+
 const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: () => void }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -302,6 +305,7 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
 
     setIsUploadStarting(true)
     setToast(null)
+    const stagedCount = stagedDocuments.length
 
     const results = await Promise.all(
       stagedDocuments.map(async ([documentType, document]) => {
@@ -329,7 +333,7 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
                   ...prev[documentType]!,
                   status: 'queued',
                   ingestRequestedAt: response.timestamp || new Date().toISOString(),
-                  statusMessage: response.message || 'Chunking started in the background.',
+                  statusMessage: `${documentLabels[documentType]} processing started in the background.`,
                 }
               : prev[documentType],
           }))
@@ -355,6 +359,12 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
     const firstError = results.find(Boolean)
     if (firstError) {
       setToast(firstError)
+    } else {
+      setToast(
+        stagedCount === 1
+          ? 'Started processing 1 document in the background.'
+          : `Started processing ${formatDocumentCountMessage(stagedCount)} in the background.`
+      )
     }
 
     setIsUploadStarting(false)
