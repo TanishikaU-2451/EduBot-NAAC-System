@@ -46,11 +46,6 @@ const createId = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2)
 
-
-
-const toStatusClass = (value?: string) =>
-  value ? value.toLowerCase().replace(/[^a-z]+/g, '-') : 'info'
-
 const formatFileSize = (size: number) => {
   if (!size) return '0 B'
   if (size < 1024) return `${size} B`
@@ -77,6 +72,9 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
   })
   const [isUploadStarting, setIsUploadStarting] = useState(false)
   const [previewDocumentType, setPreviewDocumentType] = useState<DocumentType | null>(null)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true)
+  const [isDarkMode, setIsDarkMode] = useState(false)
+  
   const chatEndRef = useRef<HTMLDivElement>(null)
   const mvsrInputRef = useRef<HTMLInputElement>(null)
   const naacInputRef = useRef<HTMLInputElement>(null)
@@ -122,6 +120,15 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
       })
     }
   }, [])
+
+  // Apply dark mode class to root html/body
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark')
+    } else {
+      document.documentElement.classList.remove('dark')
+    }
+  }, [isDarkMode])
 
   const handleSend = async (event?: FormEvent) => {
     event?.preventDefault()
@@ -246,16 +253,7 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
     try {
       const uploadResponse = await apiService.uploadDocument(file, documentType)
 
-      if (activeUploadIds.current[documentType] !== requestId) {
-        if (uploadResponse.stored_path) {
-          try {
-            await apiService.deleteStagedUpload(uploadResponse.stored_path)
-          } catch {
-            // Ignore cleanup errors for abandoned staged uploads.
-          }
-        }
-        return
-      }
+      if (activeUploadIds.current[documentType] !== requestId) return
 
       setDocuments((prev) => ({
         ...prev,
@@ -268,23 +266,17 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
           storedPath: uploadResponse.stored_path,
           storedFilename: uploadResponse.stored_filename,
           status: 'staged',
-          // Do not echo backend copy in the UI; keep it short and neutral.
           statusMessage: 'Staged.',
         },
       }))
     } catch (error) {
-      if (activeUploadIds.current[documentType] !== requestId) {
-        return
-      }
-
+      if (activeUploadIds.current[documentType] !== requestId) return
+      
       const detail = getErrorMessage(error)
       setToast(detail)
       revokePreviewUrl(documentType)
       delete activeUploadIds.current[documentType]
-      setDocuments((prev) => ({
-        ...prev,
-        [documentType]: null,
-      }))
+      setDocuments((prev) => ({ ...prev, [documentType]: null }))
     }
   }
 
@@ -339,13 +331,7 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
           const detail = getErrorMessage(error)
           setDocuments((prev) => ({
             ...prev,
-            [documentType]: prev[documentType]
-              ? {
-                  ...prev[documentType]!,
-                  status: 'error',
-                  statusMessage: detail,
-                }
-              : prev[documentType],
+            [documentType]: prev[documentType] ? { ...prev[documentType]!, status: 'error', statusMessage: detail } : prev[documentType],
           }))
           return detail
         }
@@ -353,131 +339,147 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
     )
 
     const firstError = results.find(Boolean)
-    if (firstError) {
-      setToast(firstError)
-    }
+    if (firstError) setToast(firstError)
 
     setIsUploadStarting(false)
   }
 
-  const healthLabel =
-    systemHealth === 'checking'
-      ? 'Checking'
-      : systemHealth === 'healthy'
-        ? 'Operational'
-        : systemHealth === 'degraded'
-          ? 'Degraded'
-          : 'Attention needed'
-
-  const previewDocument = previewDocumentType ? documents[previewDocumentType] : null
   const hasAnyDocument = Object.values(documents).some(Boolean)
   const hasStagedDocuments = Object.values(documents).some((document) => document?.status === 'staged')
-
-  const renderMessage = (message: ChatMessage) => {
-    if (message.role === 'assistant' && message.response) {
-      return <AssistantMessage key={message.id} message={message} />
-    }
-
-    return (
-      <div key={message.id} className={`chat-message message-${message.role}`}>
-        <div className="message-avatar">{message.role === 'user' ? 'You' : 'Guide'}</div>
-        <div className="message-bubble">
-          <p>{message.text}</p>
-          <span className="timestamp">{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-        </div>
-      </div>
-    )
-  }
+  const previewDocument = previewDocumentType ? documents[previewDocumentType] : null
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <p className="brand-name">EduBot</p>
-          <h1>Compliance Studio</h1>
-          <p className="subtitle">Built for NAAC excellence</p>
-        </div>
-        <nav>
-          {navigation.map((item) => (
-            <button
-              key={item}
-              className={`nav-item ${item === 'Chat' ? 'active' : ''}`}
-              type="button"
-            >
-              <span>{item}</span>
+    <div className="flex h-screen overflow-hidden font-sans text-themeLight-text bg-themeLight-bg secondary dark:text-themeDark-text dark:bg-themeDark-bg transition-colors duration-300">
+      
+      {/* Sidebar - Collapsible */}
+      <aside className={`flex flex-col border-r border-themeLight-border dark:border-themeDark-border bg-themeLight-bgSecondary dark:bg-themeDark-bgSecondary transition-all duration-300 ${isSidebarOpen ? 'w-64' : 'w-0 opacity-0 overflow-hidden'}`}>
+        <div className="flex flex-col h-full p-4">
+          <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-themeLight-buttonPrimary dark:bg-themeDark-buttonPrimary flex items-center justify-center text-white font-bold text-xs tracking-wider">
+                EB
+              </div>
+              <h1 className="font-semibold text-lg tracking-tight">EduBot</h1>
+            </div>
+            <button onClick={() => setIsSidebarOpen(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-1" title="Close Sidebar">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
             </button>
-          ))}
-        </nav>
-        <div className="sidebar-status">
-          <p>System status</p>
-          <span className={`status-pill status-${systemHealth}`}>{healthLabel}</span>
-        </div>
-        <div className="sidebar-user">
-          <p className="sidebar-user-name">👤 {username}</p>
-          {onLogout && (
-            <button type="button" className="logout-btn" onClick={onLogout}>
-              Sign out
-            </button>
-          )}
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            <nav className="space-y-1 mb-6">
+              <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3 px-2">Navigation</p>
+              {navigation.map((item) => (
+                <button
+                  key={item}
+                  className={`w-full text-left px-3 py-2 rounded-xl text-sm font-medium transition-colors ${item === 'Chat' ? 'bg-themeLight-buttonPrimary/10 dark:bg-themeDark-buttonPrimary/20 text-themeLight-buttonPrimary dark:text-gray-200' : 'hover:bg-themeLight-bg dark:hover:bg-themeDark-bg text-gray-600 dark:text-gray-400'}`}
+                >
+                  {item}
+                </button>
+              ))}
+            </nav>
+
+            <div className="mt-8">
+              <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3 px-2">System Status</p>
+              <div className="px-3 py-2 bg-themeLight-bg dark:bg-themeDark-bg rounded-xl border border-themeLight-border dark:border-themeDark-border flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${systemHealth === 'healthy' ? 'bg-green-500' : systemHealth === 'degraded' ? 'bg-yellow-500' : systemHealth === 'unhealthy' ? 'bg-red-500' : 'bg-gray-400 animate-pulse'}`}></span>
+                <span className="text-sm font-medium capitalize">{systemHealth}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* User Profile */}
+          <div className="pt-4 border-t border-themeLight-border dark:border-themeDark-border flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-themeLight-accent dark:bg-themeDark-accent text-white flex items-center justify-center font-medium text-sm">
+                {username.charAt(0).toUpperCase()}
+              </div>
+              <span className="font-medium text-sm truncate max-w-[100px]">{username}</span>
+            </div>
+            {onLogout && (
+              <button 
+                onClick={() => { console.log('Logout Clicked'); onLogout(); }} 
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1" 
+                title="Sign out"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+              </button>
+            )}
+          </div>
         </div>
       </aside>
 
-      <main className="workspace">
-        <div className="chat-surface">
-          <section className="document-context">
-            <div className="context-header">
-              <div>
-                <p className="eyebrow">Document workspace</p>
-                <h2>Separate MVSR evidence and NAAC requirements uploads</h2>
-                <p className="context-copy">Each section keeps its own PDF. The database upload starts only after you click Upload documents.</p>
-              </div>
-              <button
-                className="primary upload-trigger"
-                type="button"
-                onClick={handleUploadDocuments}
-                disabled={isUploadStarting || !hasStagedDocuments}
-              >
-                {isUploadStarting ? 'Starting upload...' : 'Upload documents'}
+      {/* Main Workspace */}
+      <main className="flex-1 flex flex-col min-w-0 relative">
+        <header className="h-16 flex items-center justify-between px-6 border-b border-themeLight-border dark:border-themeDark-border sticky top-0 z-10 bg-themeLight-bg/80 dark:bg-themeDark-bg/80 backdrop-blur-md">
+          <div className="flex items-center gap-4">
+            {!isSidebarOpen && (
+              <button onClick={() => setIsSidebarOpen(true)} className="p-2 -ml-2 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 transition-colors" title="Open Sidebar">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
               </button>
+            )}
+            <h2 className="font-medium text-lg text-themeLight-text dark:text-themeDark-text">Compliance model</h2>
+          </div>
+          
+          {/* Theme Toggle */}
+          <button 
+            onClick={() => setIsDarkMode(!isDarkMode)} 
+            className="w-10 h-10 rounded-full flex items-center justify-center bg-themeLight-bgSecondary dark:bg-themeDark-bgSecondary text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 transition-all focus:outline-none focus:ring-2 focus:ring-themeLight-accent dark:focus:ring-themeDark-accent"
+            title="Toggle theme"
+          >
+            {isDarkMode ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+            )}
+          </button>
+        </header>
+
+        <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-8 scroll-smooth">
+          {/* Document Context Header Area */}
+          <div className="max-w-4xl mx-auto mb-12">
+            <div className="bg-themeLight-bgSecondary/50 dark:bg-themeDark-bgSecondary/30 rounded-2xl p-6 border border-themeLight-border dark:border-themeDark-border shadow-soft dark:shadow-soft-dark">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                <div>
+                  <p className="text-xs font-semibold text-themeLight-accent dark:text-themeDark-accent uppercase tracking-widest mb-1">Document Workspace</p>
+                  <h3 className="text-xl font-medium mb-1">Evidence & Requirements</h3>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Select files to chunk and upload to the knowledge base.</p>
+                </div>
+                <button
+                  className="px-5 py-2.5 bg-themeLight-buttonPrimary hover:bg-themeLight-buttonHover dark:bg-themeDark-buttonPrimary dark:hover:bg-themeDark-buttonHover text-white rounded-xl shadow-sm transition-all font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={handleUploadDocuments}
+                  disabled={isUploadStarting || !hasStagedDocuments}
+                >
+                  {isUploadStarting ? 'Uploading...' : 'Launch Knowledge Upload'}
+                </button>
+              </div>
+
+              <input ref={mvsrInputRef} type="file" accept="application/pdf" hidden onChange={(e) => handleFileChange('mvsr_evidence', e.target.files?.[0])} />
+              <input ref={naacInputRef} type="file" accept="application/pdf" hidden onChange={(e) => handleFileChange('naac_requirement', e.target.files?.[0])} />
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {(['mvsr_evidence', 'naac_requirement'] as DocumentType[]).map((documentType) => (
+                  <UploadSlot
+                    key={documentType}
+                    document={documents[documentType]}
+                    label={documentLabels[documentType]}
+                    onBrowse={() => getInputRef(documentType).current?.click()}
+                    onClear={() => clearDocument(documentType)}
+                    onPreview={() => setPreviewDocumentType(documentType)}
+                    onDrop={(event) => handleDrop(documentType, event)}
+                  />
+                ))}
+              </div>
             </div>
+          </div>
 
-            <input
-              ref={mvsrInputRef}
-              type="file"
-              accept="application/pdf"
-              hidden
-              onChange={(event) => handleFileChange('mvsr_evidence', event.target.files?.[0])}
-            />
-            <input
-              ref={naacInputRef}
-              type="file"
-              accept="application/pdf"
-              hidden
-              onChange={(event) => handleFileChange('naac_requirement', event.target.files?.[0])}
-            />
-
-            <div className="upload-grid">
-              {(['mvsr_evidence', 'naac_requirement'] as DocumentType[]).map((documentType) => (
-                <UploadSlot
-                  key={documentType}
-                  document={documents[documentType]}
-                  label={documentLabels[documentType]}
-                  onBrowse={() => getInputRef(documentType).current?.click()}
-                  onClear={() => clearDocument(documentType)}
-                  onPreview={() => setPreviewDocumentType(documentType)}
-                  onDrop={(event) => handleDrop(documentType, event)}
-                />
-              ))}
-            </div>
-          </section>
-
-          <section className="chat-feed">
+          <div className="max-w-4xl mx-auto space-y-8 pb-32">
             {!hasAnyDocument && (
-              <div className="sample-prompts">
-                <p>Need inspiration?</p>
-                <div className="chips">
+              <div className="flex flex-col items-center justify-center py-12 text-center">
+                <p className="text-gray-500 dark:text-gray-400 mb-6 font-medium">Try asking about...</p>
+                <div className="flex flex-wrap justify-center gap-3">
                   {samplePrompts.map((prompt) => (
-                    <button key={prompt} type="button" onClick={() => handlePromptInsert(prompt)}>
+                    <button key={prompt} onClick={() => handlePromptInsert(prompt)} className="bg-themeLight-bgSecondary hover:bg-themeLight-border dark:bg-themeDark-bgSecondary dark:hover:bg-themeDark-border text-xs md:text-sm px-4 py-2 rounded-2xl transition-colors border border-themeLight-border dark:border-themeDark-border text-gray-700 dark:text-gray-300">
                       {prompt}
                     </button>
                   ))}
@@ -485,65 +487,90 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
               </div>
             )}
 
-            {messages.map(renderMessage)}
+            {messages.map((message) => {
+              if (message.role === 'assistant' && message.response) {
+                return <AssistantMessage key={message.id} message={message} />
+              }
+              if (message.role === 'system') return null; // Hide system message purely meant to prompt about PDF drop
+
+              return (
+                <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-3xl px-6 py-4 shadow-sm ${message.role === 'user' ? 'bg-themeLight-messageUser dark:bg-themeDark-messageUser text-themeLight-text dark:text-themeDark-text rounded-br-sm' : 'bg-themeLight-messageAI dark:bg-themeDark-messageAI border border-themeLight-border dark:border-themeDark-border rounded-bl-sm'}`}>
+                    <p className="text-[15px] leading-relaxed">{message.text}</p>
+                  </div>
+                </div>
+              )
+            })}
 
             {isThinking && (
-              <div className="typing-indicator">
-                <span />
-                <span />
-                <span />
-                <p>Generating insights...</p>
+              <div className="flex justify-start">
+                <div className="bg-themeLight-messageAI dark:bg-themeDark-messageAI border border-themeLight-border dark:border-themeDark-border rounded-3xl rounded-bl-sm px-6 py-4 shadow-sm flex items-center gap-2">
+                  <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></span>
+                  <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
+                  <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></span>
+                </div>
               </div>
             )}
 
             <div ref={chatEndRef} />
-          </section>
+          </div>
+        </div>
 
-          <form className="input-dock" onSubmit={handleSend}>
-            <div className="input-box">
+        {/* Input Dock */}
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-themeLight-bg via-themeLight-bg to-transparent dark:from-themeDark-bg dark:via-themeDark-bg pt-10 pb-6 px-6 z-20">
+          <div className="max-w-4xl mx-auto">
+            <form onSubmit={handleSend} className="relative flex items-center">
+              <button type="button" onClick={() => getInputRef('mvsr_evidence').current?.click()} className="absolute left-4 p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors" title="Attach Document" >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+              </button>
               <textarea
-                className="chat-input"
-                placeholder="Ask anything about compliance, gaps, or evidence..."
+                className="w-full bg-themeLight-messageAI dark:bg-themeDark-messageAI border border-themeLight-border dark:border-themeDark-border rounded-2xl pl-14 pr-16 py-4 focus:outline-none focus:ring-2 focus:ring-themeLight-accent/50 dark:focus:ring-themeDark-accent/50 resize-none shadow-soft dark:shadow-soft-dark text-[15px] placeholder-gray-400 transition-all"
+                placeholder="Ask Claude about compliance, gaps, or evidence..."
                 value={inputValue}
-                onChange={(event) => setInputValue(event.target.value)}
+                onChange={(e) => setInputValue(e.target.value)}
                 rows={1}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault()
-                    handleSend(event)
+                style={{ minHeight: '60px', maxHeight: '200px' }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend(e);
                   }
                 }}
               />
               <button
                 type="submit"
-                className="chat-send"
                 disabled={!inputValue.trim() || isThinking}
-                title="Send message"
+                className="absolute right-4 w-8 h-8 flex items-center justify-center rounded-xl bg-themeLight-buttonPrimary dark:bg-themeDark-buttonPrimary hover:bg-themeLight-buttonHover dark:hover:bg-themeDark-buttonHover text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
               >
-                ↑
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
               </button>
-            </div>
-          </form>
+            </form>
+            <p className="text-center text-xs text-gray-400 mt-3 font-medium">EduBot is an AI assistant and may occasionally make mistakes.</p>
+          </div>
         </div>
       </main>
 
+      {/* Toast Notification */}
       {toast && (
-        <div className="toast" role="status">{toast}</div>
+        <div className="absolute top-6 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white px-6 py-3 rounded-full text-sm shadow-xl z-50 animate-bounce">
+          {toast}
+        </div>
       )}
 
+      {/* Document Preview Modal */}
       {previewDocument && (
-        <div className="preview-overlay" role="dialog" aria-modal="true">
-          <div className="preview-panel">
-            <div className="preview-header">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 md:p-12">
+          <div className="bg-themeLight-bg dark:bg-themeDark-bg rounded-2xl shadow-2xl w-full max-w-6xl h-full flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b border-themeLight-border dark:border-themeDark-border">
               <div>
-                <p className="eyebrow">Previewing</p>
-                <h3>{previewDocument.name}</h3>
+                <p className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-1">Previewing</p>
+                <h3 className="font-medium text-lg truncate max-w-lg">{previewDocument.name}</h3>
               </div>
-              <button type="button" className="ghost" onClick={() => setPreviewDocumentType(null)}>
-                Close
+              <button onClick={() => setPreviewDocumentType(null)} className="p-2 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 bg-gray-100 dark:bg-gray-800 rounded-xl transition-colors">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
               </button>
             </div>
-            <iframe src={previewDocument.previewUrl} title={previewDocument.name} />
+            <iframe src={previewDocument.previewUrl} title={previewDocument.name} className="flex-1 w-full border-none bg-gray-100" />
           </div>
         </div>
       )}
@@ -551,14 +578,7 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
   )
 }
 
-const UploadSlot = ({
-  document,
-  label,
-  onBrowse,
-  onClear,
-  onPreview,
-  onDrop,
-}: {
+const UploadSlot = ({ document, label, onBrowse, onClear, onPreview, onDrop }: {
   document: UploadedDocument | null
   label: string
   onBrowse: () => void
@@ -566,68 +586,44 @@ const UploadSlot = ({
   onPreview: () => void
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void
 }) => {
-  const isClickable = !document
-  const isClearVisible = !!document && document.status !== 'queued' && document.status !== 'ingesting'
+  const isClickable = !document;
+  const isClearVisible = !!document && document.status !== 'queued' && document.status !== 'ingesting';
 
   return (
     <div
-      className={`upload-slot state-${document?.status || 'idle'}`}
-      role={isClickable ? 'button' : undefined}
-      tabIndex={isClickable ? 0 : undefined}
       onClick={isClickable ? onBrowse : undefined}
-      onKeyDown={
-        isClickable
-          ? (event) => {
-              if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar' || event.key === 'Space') {
-                event.preventDefault()
-                onBrowse()
-              }
-            }
-          : undefined
-      }
-      onDragOver={(event) => event.preventDefault()}
+      onDragOver={(e) => e.preventDefault()}
       onDrop={onDrop}
+      className={`relative p-5 rounded-2xl border-2 border-dashed transition-all group ${isClickable ? 'border-themeLight-border dark:border-themeDark-border hover:border-themeLight-accent dark:hover:border-themeDark-accent hover:bg-themeLight-bg/50 dark:hover:bg-themeDark-bgSecondary/50 cursor-pointer' : 'border-transparent bg-themeLight-bg dark:bg-themeDark-bg shadow-sm'}`}
     >
-      <div className="slot-info">
-        <p className="slot-label">{label}</p>
+      <div className="flex flex-col gap-2">
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-widest">{label}</p>
         {!document ? (
-          <h3 className="slot-empty-text">Drop PDF here or Browse</h3>
-        ) : (
-          <div className="doc-details">
-            <h3 className="doc-name" title={document.name}>{document.name}</h3>
-            <span className="doc-meta-inline">
-              {formatFileSize(document.size)} • {document.statusMessage || (document.status === 'staged' ? 'Ready to upload' : document.status)}
-            </span>
+          <div className="py-4 text-center">
+            <svg className="w-8 h-8 mx-auto mb-2 text-gray-300 dark:text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" /></svg>
+            <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Click or drag PDF here</p>
           </div>
-        )}
-      </div>
-
-      <div className="slot-actions">
-        {document && (
-          <button
-            type="button"
-            className="ghost sm"
-            onClick={(event) => {
-              event.stopPropagation()
-              onPreview()
-            }}
-            title="Preview Document"
-          >
-            👁
-          </button>
-        )}
-        {isClearVisible && (
-          <button
-            type="button"
-            className="icon-button sm"
-            onClick={(event) => {
-              event.stopPropagation()
-              void onClear()
-            }}
-            title="Remove Document"
-          >
-            ✕
-          </button>
+        ) : (
+          <div className="flex items-center justify-between mt-2">
+            <div className="min-w-0 flex-1">
+              <h4 className="font-medium text-sm text-themeLight-text dark:text-themeDark-text truncate pr-4" title={document.name}>{document.name}</h4>
+              <p className="text-xs text-gray-500 mt-1 flex items-center gap-2">
+                <span>{formatFileSize(document.size)}</span>
+                <span className="w-1 h-1 rounded-full bg-gray-300"></span>
+                <span className={`capitalize ${document.status === 'staged' ? 'text-green-600 dark:text-green-500' : ''}`}>{document.status === 'staged' ? 'Ready' : document.statusMessage || document.status}</span>
+              </p>
+            </div>
+            <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button type="button" onClick={(e) => { e.stopPropagation(); onPreview() }} className="p-1.5 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors" title="Preview">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+              </button>
+              {isClearVisible && (
+                <button type="button" onClick={(e) => { e.stopPropagation(); void onClear() }} className="p-1.5 text-red-400 hover:text-red-600 transition-colors" title="Remove">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+              )}
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -637,41 +633,41 @@ const UploadSlot = ({
 const AssistantMessage = ({ message }: { message: ChatMessage }) => {
   if (!message.response) return null
   const { response } = message
-
-  // Logging actual output vs what will be rendered
-  console.log('--- ACTUAL RAW BACKEND RESPONSE ---')
-  console.log(response)
-  console.log('--- DISPLAYED UI TEXT ---')
-  console.log(response.compliance_analysis)
-
   const complianceScore = response.compliance_score?.overall_score ?? response.confidence_score
 
   return (
-    <div className="chat-message message-assistant">
-      <div className="message-avatar">AI</div>
-      <div className="message-bubble assistant">
-        <div className="assistant-panel" style={{ display: 'block' }}>
-          <div className="message-meta" style={{ marginBottom: '1rem' }}>
-            <span className={`status-pill status-${toStatusClass(response.status)}`}>
-              {response.status || 'Status pending'}
-            </span>
-            {complianceScore !== undefined && (
-              <span className="status-pill status-info" style={{ marginLeft: '10px', background: 'var(--bg-card)', color: 'var(--text-secondary)' }}>
-                Compliance: {Math.round(complianceScore * 100)}%
-              </span>
-            )}
-            <span className="timestamp" style={{ marginLeft: 'auto' }}>
-              {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
+    <div className="flex justify-start max-w-3xl">
+      <div className="w-8 h-8 rounded-full bg-themeLight-buttonPrimary dark:bg-themeDark-buttonPrimary flex-shrink-0 flex items-center justify-center text-white mt-1 mr-4 shadow-sm">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="2"></circle><path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48 0a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"></path></svg>
+      </div>
+      <div className="flex-1">
+        {complianceScore !== undefined && (
+          <div className="inline-block bg-themeLight-bgSecondary dark:bg-themeDark-bgSecondary text-xs rounded-full px-2 py-1 mb-2 font-medium">
+            Compliance Score: {Math.round(complianceScore * 100)}%
           </div>
+        )}
+        <div className="prose prose-sm md:prose-base dark:prose-invert prose-p:leading-relaxed text-themeLight-text dark:text-themeDark-text">
+          <ReactMarkdown>{response.compliance_analysis || 'Analysis unavailable.'}</ReactMarkdown>
+        </div>
 
-          <div className="assistant-single-answer" style={{ 
-            color: 'var(--text-primary)', 
-            lineHeight: '1.6', 
-            fontSize: '15px' 
-          }}>
-            <ReactMarkdown>{response.compliance_analysis || 'Analysis unavailable.'}</ReactMarkdown>
-          </div>
+        {/* Message Actions */}
+        <div className="flex items-center gap-3 mt-4 opacity-50 hover:opacity-100 transition-opacity">
+          <button onClick={() => console.log('Copy clicked')} className="p-1.5 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 transition-colors bg-themeLight-bgSecondary dark:bg-themeDark-bgSecondary rounded-md" title="Copy">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          </button>
+          <button onClick={() => console.log('Edit clicked')} className="p-1.5 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 transition-colors bg-themeLight-bgSecondary dark:bg-themeDark-bgSecondary rounded-md" title="Edit">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+          </button>
+          <button onClick={() => console.log('Regenerate clicked')} className="p-1.5 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 transition-colors bg-themeLight-bgSecondary dark:bg-themeDark-bgSecondary rounded-md" title="Regenerate">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          </button>
+          <div className="w-px h-4 bg-gray-300 dark:bg-gray-700 mx-1"></div>
+          <button onClick={() => console.log('Thumbs Up clicked')} className="p-1.5 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 transition-colors bg-themeLight-bgSecondary dark:bg-themeDark-bgSecondary rounded-md" title="Thumbs Up">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
+          </button>
+          <button onClick={() => console.log('Thumbs Down clicked')} className="p-1.5 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 transition-colors bg-themeLight-bgSecondary dark:bg-themeDark-bgSecondary rounded-md" title="Thumbs Down">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"></path></svg>
+          </button>
         </div>
       </div>
     </div>
