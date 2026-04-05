@@ -537,7 +537,7 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
               </button>
               <textarea
                 className="w-full bg-themeLight-messageAI dark:bg-themeDark-messageAI border border-themeLight-border dark:border-themeDark-border rounded-2xl pl-14 pr-16 py-4 focus:outline-none focus:ring-2 focus:ring-themeLight-accent/50 dark:focus:ring-themeDark-accent/50 resize-none shadow-soft dark:shadow-soft-dark text-[15px] placeholder-gray-400 transition-all"
-                placeholder="Ask Claude about compliance, gaps, or evidence..."
+                placeholder="Ask AduBot"
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 rows={1}
@@ -658,7 +658,7 @@ const AssistantMessage = ({ message }: { message: ChatMessage }) => {
             Compliance Score: {Math.round(complianceScore * 100)}%
           </div>
         )}
-        <div className="prose prose-sm md:prose-base dark:prose-invert prose-p:leading-relaxed text-themeLight-text dark:text-themeDark-text">
+        <div className="text-sm md:text-base text-themeLight-text dark:text-themeDark-text leading-relaxed [&_h1]:text-2xl [&_h1]:font-semibold [&_h1]:mt-6 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:mt-5 [&_h2]:mb-3 [&_h3]:text-lg [&_h3]:font-medium [&_h3]:mt-4 [&_h3]:mb-2 [&_p]:mb-3 [&_p]:leading-relaxed [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:mb-3 [&_li]:mb-1 [&_strong]:font-semibold [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-themeLight-bgSecondary dark:[&_code]:bg-themeDark-bgSecondary [&_blockquote]:border-l-4 [&_blockquote]:border-themeLight-border dark:[&_blockquote]:border-themeDark-border [&_blockquote]:pl-4 [&_blockquote]:italic">
           <ReactMarkdown>{response.compliance_analysis || 'Analysis unavailable.'}</ReactMarkdown>
         </div>
 

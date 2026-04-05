@@ -6,8 +6,8 @@ Handles response generation using retrieved context and Groq LLM
 from typing import Dict, Any, List, Optional, Tuple
 import logging
 from dataclasses import dataclass
-import json
 
+from ..debug.trace_logger import get_pipeline_trace_logger
 from ..llm.groq_client import GroqClient
 from .retriever import RetrievalResult
 
@@ -39,6 +39,7 @@ class ComplianceGenerator:
         """
         self.llm_client = llm_client
         self.max_context_length = max_context_length
+        self.trace_logger = get_pipeline_trace_logger()
     
     def generate_compliance_response(self, 
                                    context: GenerationContext) -> Dict[str, Any]:
@@ -52,19 +53,49 @@ class ComplianceGenerator:
             Structured compliance response
         """
         logger.info(f"Generating compliance response for: '{context.user_query[:100]}...'")
+        debug_trace_id = ""
+        query_analysis = {}
+        if context.additional_context and isinstance(context.additional_context, dict):
+            debug_trace_id = str(context.additional_context.get("debug_trace_id", "") or "").strip()
+            query_analysis = context.additional_context.get("query_analysis", {}) or {}
         
         # Prepare context for generation
-        naac_context, naac_metadata = self._prepare_naac_context(context.naac_results)
-        mvsr_context, mvsr_metadata = self._prepare_mvsr_context(context.mvsr_results)
+        prepared_naac_context, naac_metadata = self._prepare_naac_context(context.naac_results)
+        prepared_mvsr_context, mvsr_metadata = self._prepare_mvsr_context(context.mvsr_results)
         
         # Ensure context doesn't exceed limits
         naac_context, mvsr_context = self._truncate_context(
-            naac_context, mvsr_context
+            prepared_naac_context, prepared_mvsr_context
         )
 
         memory_context = {}
         if context.additional_context and isinstance(context.additional_context, dict):
             memory_context = context.additional_context.get("memory_context", {}) or {}
+
+        self.trace_logger.write_json(
+            debug_trace_id,
+            "04_generation_context.json",
+            {
+                "user_query": context.user_query,
+                "query_analysis": query_analysis,
+                "max_context_length": self.max_context_length,
+                "prepared_context": {
+                    "naac_count": len(prepared_naac_context),
+                    "mvsr_count": len(prepared_mvsr_context),
+                    "naac_context": prepared_naac_context,
+                    "mvsr_context": prepared_mvsr_context,
+                },
+                "final_context_for_llm": {
+                    "naac_count": len(naac_context),
+                    "mvsr_count": len(mvsr_context),
+                    "naac_context": naac_context,
+                    "mvsr_context": mvsr_context,
+                    "naac_metadata": naac_metadata,
+                    "mvsr_metadata": mvsr_metadata,
+                    "memory_context": memory_context,
+                },
+            },
+        )
         
         # Generate response using configured LLM client
         response = self.llm_client.generate_compliance_response(
@@ -74,6 +105,7 @@ class ComplianceGenerator:
             naac_metadata=naac_metadata,
             mvsr_metadata=mvsr_metadata,
             memory_context=memory_context,
+            debug_trace_id=debug_trace_id or None,
         )
         
         # Enhance response with additional analysis

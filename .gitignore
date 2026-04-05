@@ -98,6 +98,7 @@ Thumbs.db
 *.tmp
 *.temp
 LLM_PROMPT_DEBUG.txt
+debug_logs/
 
 # Document processing temporary files
 *.pdf.txt

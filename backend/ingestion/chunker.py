@@ -305,8 +305,81 @@ class DocumentChunker:
             cleaned = para.strip()
             if cleaned and len(cleaned) > 10:  # Filter very short paragraphs
                 cleaned_paragraphs.append(cleaned + '\n\n')
-        
-        return cleaned_paragraphs if cleaned_paragraphs else [text]
+
+        if not cleaned_paragraphs:
+            cleaned_paragraphs = [text]
+
+        expanded_paragraphs: List[str] = []
+        for paragraph in cleaned_paragraphs:
+            expanded_paragraphs.extend(self._split_long_paragraph(paragraph))
+
+        return expanded_paragraphs
+
+    def _split_long_paragraph(self, paragraph: str) -> List[str]:
+        """Break oversized paragraphs into sentence-aware segments."""
+        if len(paragraph) <= self.chunk_size:
+            return [paragraph]
+
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r'(?<=[.!?])\s+', paragraph)
+            if sentence.strip()
+        ]
+
+        if len(sentences) <= 1:
+            return self._split_text_by_size(paragraph)
+
+        segments: List[str] = []
+        current_segment = ""
+
+        for sentence in sentences:
+            sentence_with_spacing = sentence + " "
+            if len(sentence_with_spacing) > self.chunk_size:
+                if current_segment.strip():
+                    segments.append(current_segment.strip() + "\n\n")
+                    current_segment = ""
+                segments.extend(self._split_text_by_size(sentence_with_spacing))
+                continue
+
+            if len(current_segment) + len(sentence_with_spacing) > self.chunk_size and current_segment.strip():
+                segments.append(current_segment.strip() + "\n\n")
+                current_segment = sentence_with_spacing
+            else:
+                current_segment += sentence_with_spacing
+
+        if current_segment.strip():
+            segments.append(current_segment.strip() + "\n\n")
+
+        return segments or self._split_text_by_size(paragraph)
+
+    def _split_text_by_size(self, text: str) -> List[str]:
+        """Fallback chunking for text with no useful paragraph or sentence breaks."""
+        normalized = text.strip()
+        if not normalized:
+            return []
+
+        segments: List[str] = []
+        start = 0
+        step = max(self.chunk_size - self.chunk_overlap, self.min_chunk_size)
+
+        while start < len(normalized):
+            end = min(start + self.chunk_size, len(normalized))
+            if end < len(normalized):
+                window = normalized[start:end]
+                split_at = max(window.rfind(" "), window.rfind(". "), window.rfind("; "), window.rfind(", "))
+                if split_at > self.min_chunk_size:
+                    end = start + split_at + 1
+
+            segment = normalized[start:end].strip()
+            if segment:
+                segments.append(segment + "\n\n")
+
+            if end >= len(normalized):
+                break
+
+            start += step
+
+        return segments
     
     def _get_overlap_text(self, text: str, overlap_size: int) -> str:
         """Get the last portion of text for overlap"""

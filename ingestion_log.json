@@ -62,5 +62,37 @@
     "document_type": "naac_requirement",
     "chunk_count": 1237,
     "timestamp": "2026-04-05T14:38:12.211585"
+  },
+  {
+    "file_path": "C:\\Users\\bhoom\\OneDrive\\Desktop\\projects\\major_project\\EduBot-NAAC-System\\uploads\\mvsr_evidence_955aa0c94621427d833d7a08b0ede50c_mvsr-SSR-Mar2019.pdf",
+    "file_name": "mvsr_evidence_955aa0c94621427d833d7a08b0ede50c_mvsr-SSR-Mar2019.pdf",
+    "file_hash": "a05ee03caeb89b69",
+    "document_type": "mvsr_evidence",
+    "chunk_count": 284,
+    "timestamp": "2026-04-05T17:38:27.353946"
+  },
+  {
+    "file_path": "C:\\Users\\bhoom\\OneDrive\\Desktop\\projects\\major_project\\EduBot-NAAC-System\\uploads\\mvsr_evidence_594151eef95c4679bfc8a664e067feb9_mvsr-SSR-Mar2019.pdf",
+    "file_name": "mvsr_evidence_594151eef95c4679bfc8a664e067feb9_mvsr-SSR-Mar2019.pdf",
+    "file_hash": "a05ee03caeb89b69",
+    "document_type": "mvsr_evidence",
+    "chunk_count": 284,
+    "timestamp": "2026-04-05T17:52:38.437035"
+  },
+  {
+    "file_path": "C:\\Users\\bhoom\\OneDrive\\Desktop\\projects\\major_project\\EduBot-NAAC-System\\uploads\\naac_requirement_3af29ac5c59c4675a9aeee7c096449a8_ssrAffiliated_Constituent-UG-PG-Colleges-4feb20201.pdf",
+    "file_name": "naac_requirement_3af29ac5c59c4675a9aeee7c096449a8_ssrAffiliated_Constituent-UG-PG-Colleges-4feb20201.pdf",
+    "file_hash": "9aed6e915cdcd333",
+    "document_type": "naac_requirement",
+    "chunk_count": 475,
+    "timestamp": "2026-04-05T17:54:10.711099"
+  },
+  {
+    "file_path": "C:\\Users\\bhoom\\OneDrive\\Desktop\\projects\\major_project\\EduBot-NAAC-System\\uploads\\mvsr_evidence_f5de221b49f740a6a22552c05000bd09_mvsr-SSR-Mar2019.pdf",
+    "file_name": "mvsr_evidence_f5de221b49f740a6a22552c05000bd09_mvsr-SSR-Mar2019.pdf",
+    "file_hash": "a05ee03caeb89b69",
+    "document_type": "mvsr_evidence",
+    "chunk_count": 284,
+    "timestamp": "2026-04-05T18:48:10.163117"
   }
 ]

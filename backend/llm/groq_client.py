@@ -5,8 +5,14 @@ Groq API client for LLM integration.
 from typing import Dict, Any, List, Optional
 import logging
 
-from groq import Groq
+try:
+    from groq import Groq
+    GROQ_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover - depends on local environment
+    Groq = None  # type: ignore[assignment]
+    GROQ_IMPORT_ERROR = exc
 
+from ..debug.trace_logger import get_pipeline_trace_logger
 from .prompt_utils import build_compliance_prompt, parse_compliance_response, format_error_response
 
 logger = logging.getLogger(__name__)
@@ -25,10 +31,21 @@ class GroqClient:
         self.model_name = model_name
         self.api_key = api_key
         self.timeout = timeout
-        self.enabled = bool(self.api_key)
+        self.sdk_available = Groq is not None
+        self.enabled = bool(self.api_key) and self.sdk_available
+        self.trace_logger = get_pipeline_trace_logger()
 
         if not self.api_key and not allow_missing_api_key:
             raise ValueError("Groq API key is required. Set GROQ_API_KEY in .env.")
+
+        if not self.sdk_available:
+            self.client = None
+            logger.warning(
+                "Groq SDK is not installed. Install it with 'pip install groq' or "
+                "'pip install -r requirements.txt'. Import error: %s",
+                GROQ_IMPORT_ERROR,
+            )
+            return
 
         if not self.api_key:
             self.client = None
@@ -48,7 +65,13 @@ class GroqClient:
         naac_metadata: List[Dict],
         mvsr_metadata: List[Dict],
         memory_context: Optional[Dict[str, Any]] = None,
+        debug_trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if not self.sdk_available:
+            return format_error_response(
+                "Groq SDK is not installed. Run 'pip install groq' or 'pip install -r requirements.txt' in the project venv, then restart the backend."
+            )
+
         if not self.enabled:
             return format_error_response(
                 "Groq API key is not configured. Set GROQ_API_KEY in .env and restart the backend."
@@ -63,6 +86,21 @@ class GroqClient:
         logger.info("NAAC Chunks: %s", len(naac_context))
         logger.info("MVSR Chunks: %s", len(mvsr_context))
         logger.debug("[LLM DEBUG] Full Prompt sent to Groq:\n%s\n%s", prompt, "=" * 50)
+        self.trace_logger.write_json(
+            debug_trace_id or "",
+            "05_llm_request.json",
+            {
+                "provider": "groq",
+                "model": self.model_name,
+                "temperature": 0.0,
+                "max_tokens": 1800,
+                "top_p": 1.0,
+                "user_query": user_query,
+                "naac_chunks": len(naac_context),
+                "mvsr_chunks": len(mvsr_context),
+            },
+        )
+        self.trace_logger.write_text(debug_trace_id or "", "06_prompt.txt", prompt)
 
         try:
             response = self.client.chat.completions.create(
@@ -73,14 +111,26 @@ class GroqClient:
                 top_p=1.0,
             )
             generated_text = self._extract_message_content(response)
+            self.trace_logger.write_text(debug_trace_id or "", "07_raw_llm_output.txt", generated_text)
             structured_response = parse_compliance_response(
                 generated_text, naac_metadata, mvsr_metadata
+            )
+            self.trace_logger.write_json(
+                debug_trace_id or "",
+                "08_parsed_llm_output.json",
+                structured_response,
             )
             logger.info("Generated compliance response successfully")
             return structured_response
 
         except Exception as exc:
             logger.error("Error generating Groq response: %s", exc)
+            self.trace_logger.write_error(
+                debug_trace_id or "",
+                str(exc),
+                stage="groq_generate_compliance_response",
+                model=self.model_name,
+            )
             return format_error_response(str(exc))
 
     def test_connection(self) -> bool:
@@ -106,6 +156,7 @@ class GroqClient:
             "model_name": self.model_name,
             "timeout": self.timeout,
             "enabled": self.enabled,
+            "sdk_available": self.sdk_available,
         }
 
     def _extract_message_content(self, response: Any) -> str:

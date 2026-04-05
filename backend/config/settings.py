@@ -83,6 +83,8 @@ class Settings(BaseSettings):
     # Logging settings
     log_level: str = Field("INFO", env="LOG_LEVEL")
     log_file: Optional[str] = Field(None, env="LOG_FILE")
+    pipeline_debug_enabled: bool = Field(False, env="PIPELINE_DEBUG_ENABLED")
+    pipeline_debug_dir: str = Field("./debug_logs", env="PIPELINE_DEBUG_DIR")
     
     # Security settings
     api_key: Optional[str] = Field(None, env="API_KEY")

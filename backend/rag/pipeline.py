@@ -6,9 +6,10 @@ Orchestrates retrieval and generation for complete RAG workflow
 from typing import Dict, Any, Optional, List
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from collections import deque
+import re
 
 from typing import Protocol
 
@@ -17,6 +18,7 @@ class VectorStore(Protocol):
     def query_naac_requirements(self, query_text: str, n_results: int = 5, criterion_filter: str | None = None) -> Dict[str, Any]: ...
     def query_mvsr_evidence(self, query_text: str, n_results: int = 5, category_filter: str | None = None) -> Dict[str, Any]: ...
 from ..llm.groq_client import GroqClient
+from ..debug.trace_logger import get_pipeline_trace_logger
 from .retriever import ComplianceRetriever, RetrievalResult
 from .generator import ComplianceGenerator, GenerationContext
 from .reranker import ComplianceReranker, RerankerConfig
@@ -28,7 +30,7 @@ class QueryContext:
     """Extended context for query processing"""
     original_query: str
     processed_query: str
-    query_type: str  # 'general', 'criterion_specific', 'evidence_lookup', 'gap_analysis'
+    query_type: str  # 'general', 'direct_question', 'criterion_specific', 'evidence_lookup', 'gap_analysis'
     suggested_filters: Dict[str, Any]
     confidence_threshold: float
 
@@ -107,6 +109,7 @@ class RAGPipeline:
         self.query_history = deque(maxlen=1000)  # Store last 1000 queries
         self.last_query_time = None
         self.response_times = deque(maxlen=100)  # Store last 100 response times
+        self.trace_logger = get_pipeline_trace_logger()
     
     def process_query(self,
                      user_query: str,
@@ -123,12 +126,30 @@ class RAGPipeline:
             Complete structured response
         """
         start_time = time.time()
+        trace_id = self.trace_logger.create_trace_id("query", user_query[:60])
 
         logger.info(f"Processing query: '{user_query[:100]}...'")
+        logger.info("Query trace id: %s", trace_id)
 
         try:
+            self.trace_logger.write_json(
+                trace_id,
+                "00_query_request.json",
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "user_query": user_query,
+                    "context_filters": context_filters or {},
+                    "memory_context": memory_context or {},
+                },
+            )
+
             # Step 1: Analyze and process query
             query_context = self._analyze_query(user_query)
+            self.trace_logger.write_json(
+                trace_id,
+                "01_query_analysis.json",
+                asdict(query_context),
+            )
 
             # Step 2: Apply any provided filters
             if context_filters:
@@ -136,12 +157,30 @@ class RAGPipeline:
 
             # Step 3: Retrieve relevant context
             naac_results, mvsr_results = self._retrieve_context(query_context)
+            self.trace_logger.write_json(
+                trace_id,
+                "02_retrieval_before_rerank.json",
+                {
+                    "naac_results": self._serialize_retrieval_result(naac_results),
+                    "mvsr_results": self._serialize_retrieval_result(mvsr_results),
+                },
+            )
 
             # Step 4: Cross-encoder rerank — re-scores with joint query-doc attention
             if self.reranker.enabled:
                 logger.info("Applying cross-encoder reranking to retrieved candidates.")
                 naac_results = self.reranker.rerank(user_query, naac_results)
                 mvsr_results = self.reranker.rerank(user_query, mvsr_results)
+
+            self.trace_logger.write_json(
+                trace_id,
+                "03_retrieval_after_rerank.json",
+                {
+                    "reranker_enabled": self.reranker.enabled,
+                    "naac_results": self._serialize_retrieval_result(naac_results),
+                    "mvsr_results": self._serialize_retrieval_result(mvsr_results),
+                },
+            )
 
             # Step 5: Generate response
             generation_context = GenerationContext(
@@ -151,6 +190,7 @@ class RAGPipeline:
                 additional_context={
                     'query_analysis': query_context,
                     'memory_context': memory_context or {},
+                    'debug_trace_id': trace_id,
                 }
             )
 
@@ -166,7 +206,8 @@ class RAGPipeline:
                 'retrieval_stats': {
                     'naac_documents': len(naac_results.documents),
                     'mvsr_documents': len(mvsr_results.documents)
-                }
+                },
+                'trace_id': trace_id,
             }
 
             # Track query statistics
@@ -178,11 +219,23 @@ class RAGPipeline:
                 'response_time': processing_time
             })
 
+            self.trace_logger.write_json(
+                trace_id,
+                "09_pipeline_response.json",
+                response,
+            )
+
             logger.info(f"Query processed successfully in {processing_time:.2f}s")
             return response
 
         except Exception as e:
             logger.error(f"Error processing query: {e}")
+            self.trace_logger.write_error(
+                trace_id,
+                str(e),
+                stage="process_query",
+                user_query=user_query,
+            )
             return self._generate_error_response(user_query, str(e))
     
     def _analyze_query(self, query: str) -> QueryContext:
@@ -193,7 +246,6 @@ class RAGPipeline:
         # Detect criterion references
         criterion_match = None
         for pattern in self.query_patterns['criterion_patterns']:
-            import re
             match = re.search(pattern, query_lower)
             if match:
                 criterion_match = match.group(1).split('.')[0]  # Get criterion number
@@ -212,10 +264,12 @@ class RAGPipeline:
             if any(keyword in query_lower for keyword in keywords):
                 query_type = q_type
                 break
-        
+
         # Override if criterion-specific
         if criterion_match:
             query_type = 'criterion_specific'
+        elif query_type == 'general' and self._looks_like_direct_question(query_lower):
+            query_type = 'direct_question'
         
         # Build suggested filters
         suggested_filters = {}
@@ -243,8 +297,9 @@ class RAGPipeline:
         
         enhancements = []
         
-        # Add NAAC context
-        enhancements.append("NAAC compliance")
+        # Add NAAC context for audit-oriented questions, but keep direct questions focused.
+        if query_type != 'direct_question':
+            enhancements.append("NAAC compliance")
         
         # Add criterion context if detected
         if criterion:
@@ -255,7 +310,7 @@ class RAGPipeline:
             'gap_analysis': "compliance gap analysis requirements",
             'evidence_lookup': "institutional evidence documentation",
             'compliance_check': "NAAC standards compliance verification", 
-            'requirements': "NAAC accreditation requirements"
+            'requirements': "NAAC accreditation requirements",
         }
         
         if query_type in type_context:
@@ -264,6 +319,12 @@ class RAGPipeline:
         # Combine with original query
         enhanced = f"{original_query} {' '.join(enhancements)}"
         return enhanced.strip()
+
+    def _looks_like_direct_question(self, query: str) -> bool:
+        """Detect narrow factual questions that should stay answer-focused."""
+        if re.match(r"^(what|which|who|when|where|why|how|is|are|does|do|can|did)\b", query):
+            return True
+        return query.endswith("?")
     
     def _retrieve_context(self, query_context: QueryContext) -> tuple[RetrievalResult, RetrievalResult]:
         """Retrieve context based on query analysis"""
@@ -417,6 +478,29 @@ class RAGPipeline:
                 'error_message': error
             },
             'confidence_score': 0.0
+        }
+
+    def _serialize_retrieval_result(self, result: RetrievalResult) -> Dict[str, Any]:
+        rows = []
+        for index, (doc, meta, dist) in enumerate(
+            zip(result.documents, result.metadatas, result.distances),
+            start=1,
+        ):
+            rows.append(
+                {
+                    'rank': index,
+                    'distance': dist,
+                    'similarity': round(1 - dist, 4),
+                    'metadata': meta,
+                    'document': doc,
+                    'document_preview': doc[:500],
+                }
+            )
+
+        return {
+            'source_type': result.source_type,
+            'count': len(rows),
+            'rows': rows,
         }
     
     def get_pipeline_health(self) -> Dict[str, Any]:

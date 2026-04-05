@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
+from ..debug.trace_logger import get_pipeline_trace_logger
 from .chunker import DocumentChunker, TextChunk
 from .pdf_loader import PDFLoader
 
@@ -77,6 +78,7 @@ class DocumentIngestionPipeline:
                 ),
             ),
         )
+        self.trace_logger = get_pipeline_trace_logger()
 
         # Track ingested documents to avoid duplicates
         self.ingestion_log = self._load_ingestion_log()
@@ -366,6 +368,27 @@ class DocumentIngestionPipeline:
         if not path_obj.exists():
             raise FileNotFoundError(f"Document not found: {path_obj}")
 
+        trace_id = self.trace_logger.create_trace_id("ingest", path_obj.stem)
+        logger.info("Ingestion trace id: %s", trace_id)
+        self.trace_logger.write_json(
+            trace_id,
+            "00_ingest_request.json",
+            {
+                "timestamp": datetime.now().isoformat(),
+                "file_path": str(path_obj),
+                "document_type": document_type,
+                "additional_metadata": additional_metadata or {},
+                "chunker_config": {
+                    "default_chunk_size": self.chunker.chunk_size,
+                    "default_chunk_overlap": self.chunker.chunk_overlap,
+                    "large_document_page_threshold": self.large_document_page_threshold,
+                    "large_document_chunk_size": self.large_document_chunker.chunk_size,
+                    "large_document_chunk_overlap": self.large_document_chunker.chunk_overlap,
+                    "min_chunk_length": self.min_chunk_length,
+                },
+            },
+        )
+
         try:
             text, metadata = self.pdf_loader.load_pdf(str(path_obj), document_type)
 
@@ -373,15 +396,81 @@ class DocumentIngestionPipeline:
                 for key, value in additional_metadata.items():
                     setattr(metadata, key, value)
 
-            chunks = self._chunk_with_fallback(text, metadata.__dict__.copy())
+            metadata_dict = metadata.__dict__.copy()
+            total_pages = int(metadata_dict.get("total_pages", 1) or 1)
+            chunker_name = (
+                "large_document_chunker"
+                if total_pages >= self.large_document_page_threshold
+                else "default_chunker"
+            )
+            self.trace_logger.write_json(
+                trace_id,
+                "01_extraction_summary.json",
+                {
+                    "file": path_obj.name,
+                    "document_type": document_type,
+                    "text_length": len(text or ""),
+                    "total_pages": total_pages,
+                    "chunker_selected": chunker_name,
+                    "metadata": metadata_dict,
+                },
+            )
+            self.trace_logger.write_text(trace_id, "01_extracted_text.txt", text or "")
+
+            chunks = self._chunk_with_fallback(text, metadata_dict)
             if not chunks:
+                self.trace_logger.write_json(
+                    trace_id,
+                    "02_chunk_summary.json",
+                    {
+                        "chunks_generated": 0,
+                        "message": "No chunks were produced from extracted text.",
+                    },
+                )
                 return {
                     "file": path_obj.name,
                     "status": "failed",
                     "error": "No text extracted from document",
                 }
 
-            documents, metadatas = self._prepare_chunk_rows(chunks, metadata.__dict__.copy())
+            self.trace_logger.write_json(
+                trace_id,
+                "02_chunk_summary.json",
+                self._summarize_chunks(chunks),
+            )
+            self.trace_logger.write_json(
+                trace_id,
+                "02_chunks.json",
+                self._serialize_chunks(chunks),
+            )
+
+            documents, metadatas = self._prepare_chunk_rows(chunks, metadata_dict)
+            self.trace_logger.write_json(
+                trace_id,
+                "03_vector_rows.json",
+                {
+                    "rows_written": len(documents),
+                    "documents": documents,
+                    "metadatas": metadatas,
+                },
+            )
+            if not documents:
+                self.trace_logger.write_json(
+                    trace_id,
+                    "99_ingest_result.json",
+                    {
+                        "file": path_obj.name,
+                        "status": "failed",
+                        "error": "No vector rows remained after chunk cleaning and deduplication.",
+                        "debug_trace_id": trace_id,
+                    },
+                )
+                return {
+                    "file": path_obj.name,
+                    "status": "failed",
+                    "error": "No vector rows remained after chunk cleaning and deduplication.",
+                    "debug_trace_id": trace_id,
+                }
 
             logger.info(
                 "[DB-WRITE] About to write %d chunks for '%s' (type=%s) to vector store",
@@ -408,24 +497,35 @@ class DocumentIngestionPipeline:
             except Exception as stats_err:
                 logger.warning("[DB-WRITE] Could not fetch post-write stats: %s", stats_err)
 
-            self._log_ingestion(path_obj, document_type, len(chunks))
+            self._log_ingestion(path_obj, document_type, len(documents))
             result = {
                 "file": path_obj.name,
                 "document_type": document_type,
-                "chunks_written": len(chunks),
+                "chunks_generated": len(chunks),
+                "chunks_written": len(documents),
                 "status": "success",
                 "ingestion_timestamp": datetime.now().isoformat(),
-                "metadata": metadata.__dict__,
+                "metadata": metadata_dict,
+                "debug_trace_id": trace_id,
             }
+            self.trace_logger.write_json(trace_id, "99_ingest_result.json", result)
 
-            logger.info("Successfully ingested %s as %s chunk rows", path_obj.name, len(chunks))
+            logger.info("Successfully ingested %s as %s chunk rows", path_obj.name, len(documents))
             return result
         except Exception as e:
             logger.error("Failed to ingest document %s: %s", path_obj.name, e, exc_info=True)
+            self.trace_logger.write_error(
+                trace_id,
+                str(e),
+                stage="ingest_single_document",
+                file=path_obj.name,
+                document_type=document_type,
+            )
             return {
                 "file": path_obj.name,
                 "status": "failed",
                 "error": str(e),
+                "debug_trace_id": trace_id,
             }
 
     def get_ingestion_statistics(self) -> Dict[str, Any]:
@@ -514,6 +614,37 @@ class DocumentIngestionPipeline:
         )
         merged["section_header"] = self._derive_section_header(chunk, merged)
         return merged
+
+    def _serialize_chunks(self, chunks: List[TextChunk]) -> List[Dict[str, Any]]:
+        """Convert chunk objects into debug-friendly dictionaries."""
+        serialized = []
+        for chunk in chunks:
+            serialized.append(
+                {
+                    "chunk_index": chunk.chunk_index,
+                    "chunk_type": chunk.chunk_type,
+                    "start_page": chunk.start_page,
+                    "end_page": chunk.end_page,
+                    "text_length": len(chunk.text or ""),
+                    "text_preview": (chunk.text or "")[:500],
+                    "text": chunk.text or "",
+                    "metadata": chunk.metadata or {},
+                }
+            )
+        return serialized
+
+    def _summarize_chunks(self, chunks: List[TextChunk]) -> Dict[str, Any]:
+        """Build a compact chunking summary for trace inspection."""
+        if not chunks:
+            return {"chunks_generated": 0}
+
+        stats = self.chunker.get_chunk_statistics(chunks)
+        stats["chunks_generated"] = len(chunks)
+        stats["sample_headers"] = [
+            self._derive_section_header(chunk, chunk.metadata or {})
+            for chunk in chunks[:5]
+        ]
+        return stats
 
     def _clean_chunk_text(self, text: str) -> str:
         """Remove page markers and noisy whitespace before embedding."""

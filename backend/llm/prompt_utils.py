@@ -15,6 +15,7 @@ def build_compliance_prompt(
     memory_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Construct the structured NAAC compliance prompt."""
+    response_mode = _determine_response_mode(user_query)
     context_parts: List[str] = []
 
     if naac_context:
@@ -65,39 +66,45 @@ def build_compliance_prompt(
     memory_lines: List[str] = []
     for idx, memory in enumerate(short_term_memories[-6:], start=1):
         role = str(memory.get("role", "user"))
-        content = str(memory.get("content", "")).strip()
+        if role.lower() != "user":
+            continue
+        content = _truncate_memory_content(str(memory.get("content", "")).strip(), 240)
         if content:
             memory_lines.append(f"[Short-Term {idx}] ({role}) {content}")
     for idx, memory in enumerate(long_term_memories[:4], start=1):
         role = str(memory.get("role", "user"))
-        content = str(memory.get("content", "")).strip()
+        if role.lower() != "user":
+            continue
+        content = _truncate_memory_content(str(memory.get("content", "")).strip(), 240)
         similarity = memory.get("similarity")
         if content:
             memory_lines.append(f"[Long-Term {idx}] ({role}, sim={similarity}) {content}")
 
     memory_block = "\n".join(memory_lines) if memory_lines else "No memory context available."
+    task_instructions = _build_task_instructions(response_mode)
+    output_instructions = _build_output_instructions(response_mode)
 
-    prompt = f"""You are an expert, meticulous NAAC compliance audit critic.
+    return f"""You are an expert, meticulous NAAC compliance analyst.
 
 Primary task:
-Critically verify whether the college/university NAAC report satisfies applicable NAAC requirements.
-Identify specific mistakes, missing evidence, weak claims, or contradictions in the submitted report.
-Provide exact corrective actions showing what must be added or fixed.
-Be thorough but non-repetitive.
+{task_instructions}
 
 Operating rules:
-1) Treat NAAC requirement context as normative criteria.
-2) Treat college report/evidence context as claims to be validated.
-3) Do not assume compliance if evidence is missing, UNLESS rule 5 applies.
-4) If context is insufficient, explicitly list what is missing point-by-point.
+1) Treat NAAC requirement context as normative criteria when the user is asking for compliance or audit analysis.
+2) Treat college report/evidence context as claims or factual evidence to be validated against the user query.
+3) Answer only from the retrieved context and conversation memory shown below. Do not invent facts.
+4) If context is insufficient, say so plainly and list what is missing.
 5) IMPORTANT RULE FOR EVIDENCE LINKS: If the college evidence text mentions "View Document", "Link", or provides a URL/hyperlink, assume the relevant documentary evidence is already attached. Do not penalize missing attachment content when such markers are present.
-6) Do not repeat the same condition, evidence, judgment, or recommendation in multiple places.
-7) If multiple NAAC chunks express the same rule, merge them into one checkpoint.
-8) If two findings have the same evidence, same judgment, and same recommendation, combine them into a single finding.
-9) Prefer 4-6 unique findings over many repetitive findings.
+6) Do not repeat the same condition, evidence, judgment, recommendation, or conclusion in multiple places.
+7) If multiple retrieved chunks say the same thing, merge them into one point.
+8) Prefer a precise answer over an exhaustive but repetitive answer.
+9) If the user asks a narrow factual question, do not turn it into a full institutional audit.
 
 User query:
 {user_query}
+
+Detected response mode:
+{response_mode}
 
 Retrieved metadata snapshot:
 - NAAC: {naac_meta_summary}
@@ -109,42 +116,8 @@ Conversation memory:
 Retrieved context:
 {context_block}
 
-Audit workflow to follow:
-A) Extract the relevant NAAC conditions/checkpoints for this query.
-B) Merge overlapping or duplicate conditions into one checkpoint before writing the answer.
-C) Check each unique checkpoint against available college evidence.
-D) Mark each checkpoint as Satisfied / Partially Satisfied / Not Satisfied / Insufficient Evidence.
-E) Identify specific mistakes, unsupported claims, gaps, or contradictions.
-F) Provide prioritized remediation steps with exact additions needed.
-G) Remove duplicate bullets, duplicate paragraphs, and duplicate conclusions before finalizing the answer.
-
-Return output using ONLY these XML tags and in this order. Write markdown inside the first tag using these exact sections:
-1. Relevant NAAC Checkpoints
-2. Audit Findings
-3. Specific Weak Claims or Gaps
-4. Prioritized Remediation Steps
-5. Missing or Insufficient Evidence
-6. Conclusion
-In "Audit Findings", merge duplicate conditions as a combined finding such as "Conditions 1-3" when the evidence and judgment are the same.
-<comprehensive_audit>Single, unified audit. No repeated headings, no repeated bullets, no repeated recommendations, no repeated conclusion sentences.</comprehensive_audit>
-<status>One of: Fully Supported, Partially Supported, Gap Identified, Insufficient Evidence, Processing Error.</status>
+{output_instructions}
 """
-
-    try:
-        import os
-
-        debug_path = os.path.join(os.getcwd(), "LLM_PROMPT_DEBUG.txt")
-        with open(debug_path, "w", encoding="utf-8") as f:
-            f.write("=" * 20 + " SYSTEM PROMPT " + "=" * 20 + "\n")
-            f.write(f"Query: {user_query}\n")
-            f.write(f"NAAC Chunks: {len(naac_context)}\n")
-            f.write(f"MVSR Chunks: {len(mvsr_context)}\n")
-            f.write("=" * 20 + " ACTUAL START " + "=" * 20 + "\n\n")
-            f.write(prompt)
-    except Exception as e:
-        print(f"Failed to write prompt debug log: {e}")
-
-    return prompt
 
 
 def parse_compliance_response(
@@ -223,6 +196,86 @@ def _format_chunk_label(
         parts.append(f"{field.replace('_', ' ')}={value}")
     suffix = f" | {' | '.join(parts)}" if parts else ""
     return f"[{prefix} {index}{suffix}]"
+
+
+def _determine_response_mode(user_query: str) -> str:
+    query = (user_query or "").strip().lower()
+    audit_keywords = [
+        "audit",
+        "compliance",
+        "gap",
+        "checkpoint",
+        "condition",
+        "criterion",
+        "analyze",
+        "analysis",
+        "evaluate",
+        "weak claim",
+        "remediation",
+        "recommendation",
+        "satisfied",
+    ]
+
+    if any(keyword in query for keyword in audit_keywords):
+        return "audit"
+
+    if re.match(r"^(what|which|who|when|where|why|how|is|are|does|do|can|did)\b", query):
+        return "direct_answer"
+
+    return "audit"
+
+
+def _build_task_instructions(response_mode: str) -> str:
+    if response_mode == "direct_answer":
+        return (
+            "Answer the user's exact question using the retrieved document context. "
+            "Stay direct, concise, and non-repetitive. Quote or paraphrase only what the "
+            "retrieved evidence supports, and explicitly say when the context does not contain the answer."
+        )
+
+    return (
+        "Critically verify whether the college/university report satisfies applicable NAAC requirements. "
+        "Identify specific mistakes, missing evidence, weak claims, or contradictions, and provide exact "
+        "corrective actions. Be thorough but non-repetitive."
+    )
+
+
+def _build_output_instructions(response_mode: str) -> str:
+    if response_mode == "direct_answer":
+        return """Return output using ONLY these XML tags and in this order. Write markdown inside the first tag using these exact sections:
+1. Direct Answer
+2. Supporting Evidence
+3. Missing Evidence or Uncertainty
+Keep the answer compact when the query is narrow and factual.
+<comprehensive_audit>Direct, non-repetitive answer grounded in the retrieved context.</comprehensive_audit>
+<status>One of: Fully Supported, Partially Supported, Insufficient Evidence, Processing Error.</status>"""
+
+    return """Audit workflow to follow:
+A) Extract the relevant NAAC conditions/checkpoints for this query.
+B) Merge overlapping or duplicate conditions into one checkpoint before writing the answer.
+C) Check each unique checkpoint against available college evidence.
+D) Mark each checkpoint as Satisfied / Partially Satisfied / Not Satisfied / Insufficient Evidence.
+E) Identify specific mistakes, unsupported claims, gaps, or contradictions.
+F) Provide prioritized remediation steps with exact additions needed.
+G) Remove duplicate bullets, duplicate paragraphs, and duplicate conclusions before finalizing the answer.
+
+Return output using ONLY these XML tags and in this order. Write markdown inside the first tag using these exact sections:
+1. Relevant NAAC Checkpoints
+2. Audit Findings
+3. Specific Weak Claims or Gaps
+4. Prioritized Remediation Steps
+5. Missing or Insufficient Evidence
+6. Conclusion
+In "Audit Findings", merge duplicate conditions as a combined finding such as "Conditions 1-3" when the evidence and judgment are the same.
+<comprehensive_audit>Single, unified audit. No repeated headings, no repeated bullets, no repeated recommendations, no repeated conclusion sentences.</comprehensive_audit>
+<status>One of: Fully Supported, Partially Supported, Gap Identified, Insufficient Evidence, Processing Error.</status>"""
+
+
+def _truncate_memory_content(text: str, max_length: int) -> str:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max_length - 3].rstrip() + "..."
 
 
 def _summarize_metadata(
