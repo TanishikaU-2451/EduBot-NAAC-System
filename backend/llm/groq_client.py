@@ -113,7 +113,10 @@ class GroqClient:
             generated_text = self._extract_message_content(response)
             self.trace_logger.write_text(debug_trace_id or "", "07_raw_llm_output.txt", generated_text)
             structured_response = parse_compliance_response(
-                generated_text, naac_metadata, mvsr_metadata
+                generated_text,
+                naac_metadata,
+                mvsr_metadata,
+                user_query=user_query,
             )
             self.trace_logger.write_json(
                 debug_trace_id or "",

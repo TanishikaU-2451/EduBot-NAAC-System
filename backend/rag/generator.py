@@ -79,6 +79,20 @@ class ComplianceGenerator:
                 "user_query": context.user_query,
                 "query_analysis": query_analysis,
                 "max_context_length": self.max_context_length,
+                "retrieval_summary": {
+                    "naac": {
+                        "source_type": context.naac_results.source_type,
+                        "raw_count": len(context.naac_results.documents),
+                        "used_threshold_fallback": context.naac_results.used_threshold_fallback,
+                        "notes": context.naac_results.retrieval_notes or [],
+                    },
+                    "mvsr": {
+                        "source_type": context.mvsr_results.source_type,
+                        "raw_count": len(context.mvsr_results.documents),
+                        "used_threshold_fallback": context.mvsr_results.used_threshold_fallback,
+                        "notes": context.mvsr_results.retrieval_notes or [],
+                    },
+                },
                 "prepared_context": {
                     "naac_count": len(prepared_naac_context),
                     "mvsr_count": len(prepared_mvsr_context),
@@ -96,6 +110,27 @@ class ComplianceGenerator:
                 },
             },
         )
+
+        if not naac_context and not mvsr_context:
+            logger.warning("Skipping LLM call because retrieval returned no usable context.")
+            empty_response = self._build_empty_context_response(
+                user_query=context.user_query,
+                naac_results=context.naac_results,
+                mvsr_results=context.mvsr_results,
+            )
+            self.trace_logger.write_json(
+                debug_trace_id,
+                "05_llm_skipped.json",
+                {
+                    "reason": "No usable NAAC or MVSR context remained after retrieval and preparation.",
+                    "response": empty_response,
+                },
+            )
+            enhanced_response = self._enhance_response(
+                empty_response, context.naac_results, context.mvsr_results
+            )
+            logger.info("Returned deterministic empty-context response without calling the LLM")
+            return enhanced_response
         
         # Generate response using configured LLM client
         response = self.llm_client.generate_compliance_response(
@@ -115,6 +150,54 @@ class ComplianceGenerator:
         
         logger.info("Compliance response generated successfully")
         return enhanced_response
+
+    def _build_empty_context_response(
+        self,
+        user_query: str,
+        naac_results: RetrievalResult,
+        mvsr_results: RetrievalResult,
+    ) -> Dict[str, Any]:
+        """Return a deterministic response when retrieval finds no usable context."""
+        notes: List[str] = []
+        notes.extend(naac_results.retrieval_notes or [])
+        notes.extend(mvsr_results.retrieval_notes or [])
+
+        missing_lines = [
+            "No retrieved chunk was strong enough to support an answer from the current vector-store results.",
+            "This usually means retrieval filtering is too strict, the uploaded chunks were not stored correctly, or the query wording did not match the indexed text.",
+        ]
+        if notes:
+            missing_lines.append("Retrieval diagnostics:")
+            missing_lines.extend(f"- {note}" for note in notes)
+
+        return {
+            "naac_requirement": "",
+            "mvsr_evidence": "",
+            "naac_mapping": "",
+            "compliance_analysis": (
+                "1. Direct Answer\n"
+                "The system could not answer this query from the retrieved document context because no usable chunks were selected.\n\n"
+                "2. Supporting Evidence\n"
+                "No supporting evidence was retrieved for this question.\n\n"
+                "3. Missing Evidence or Uncertainty\n"
+                + "\n".join(missing_lines)
+            ),
+            "status": "Insufficient Evidence",
+            "recommendations": "",
+            "query_processed": False,
+            "parse_warnings": [
+                "LLM call skipped because retrieval returned no usable context."
+            ],
+            "context_sources": {
+                "naac_sources": len(naac_results.documents),
+                "mvsr_sources": len(mvsr_results.documents),
+            },
+            "retrieval_diagnostics": {
+                "user_query": user_query,
+                "naac_notes": naac_results.retrieval_notes or [],
+                "mvsr_notes": mvsr_results.retrieval_notes or [],
+            },
+        }
     
     def _prepare_naac_context(self, 
                             naac_results: RetrievalResult) -> Tuple[List[str], List[Dict[str, Any]]]:

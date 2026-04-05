@@ -6,11 +6,25 @@ Handles environment variables and application settings
 import os
 from pathlib import Path
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from typing import Optional, List
 
 class Settings(BaseSettings):
     """Application settings with environment variable support"""
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def _coerce_debug_flag(cls, value):
+        """Accept common environment-style debug values without crashing settings load."""
+        if isinstance(value, bool) or value is None:
+            return value
+
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on", "debug", "development", "dev"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "release", "production", "prod"}:
+            return False
+        return value
     
     # Application settings
     app_name: str = Field("NAAC Compliance Intelligence System", env="APP_NAME")
@@ -42,9 +56,6 @@ class Settings(BaseSettings):
     vector_insert_batch_size: int = Field(1000, env="VECTOR_INSERT_BATCH_SIZE")
     
     # Document processing settings
-    data_directory: str = Field("./data", env="DATA_DIRECTORY")
-    cache_directory: str = Field("./cache", env="CACHE_DIRECTORY")
-    uploads_directory: str = Field("./uploads", env="UPLOADS_DIRECTORY")
     pdf_extraction_strategy: str = Field("auto", env="PDF_EXTRACTION_STRATEGY")
     pdf_extract_tables: bool = Field(False, env="PDF_EXTRACT_TABLES")
     large_document_page_threshold: int = Field(120, env="LARGE_DOCUMENT_PAGE_THRESHOLD")
@@ -85,6 +96,8 @@ class Settings(BaseSettings):
     log_file: Optional[str] = Field(None, env="LOG_FILE")
     pipeline_debug_enabled: bool = Field(False, env="PIPELINE_DEBUG_ENABLED")
     pipeline_debug_dir: str = Field("./debug_logs", env="PIPELINE_DEBUG_DIR")
+    auto_ingest_enabled: bool = Field(False, env="AUTO_INGEST_ENABLED")
+    persist_ingestion_log: bool = Field(False, env="PERSIST_INGESTION_LOG")
     
     # Security settings
     api_key: Optional[str] = Field(None, env="API_KEY")
@@ -102,24 +115,6 @@ class Settings(BaseSettings):
         env_file = (".env", "../.env")
         env_file_encoding = "utf-8"
         extra = "ignore"  # Allow extra fields in environment
-    
-    def get_data_path(self) -> Path:
-        """Get data directory as Path object"""
-        path = Path(self.data_directory)
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    
-    def get_cache_path(self) -> Path:
-        """Get cache directory as Path object"""
-        path = Path(self.cache_directory)
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    
-    def get_uploads_path(self) -> Path:
-        """Get uploads directory as Path object"""
-        path = Path(self.uploads_directory)
-        path.mkdir(parents=True, exist_ok=True)
-        return path
     
     def get_chroma_path(self) -> Path:
         """Get ChromaDB directory as Path object"""

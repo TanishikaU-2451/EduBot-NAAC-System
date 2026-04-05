@@ -24,6 +24,8 @@ class RetrievalResult:
     metadatas: List[Dict[str, Any]]
     distances: List[float]
     source_type: str  # 'naac_requirement' or 'mvsr_evidence'
+    used_threshold_fallback: bool = False
+    retrieval_notes: Optional[List[str]] = None
 
 class ComplianceRetriever:
     """
@@ -143,7 +145,7 @@ class ComplianceRetriever:
             )
             
             # Filter results by similarity threshold
-            filtered_docs, filtered_metadatas, filtered_distances = self._filter_by_similarity(
+            filtered_docs, filtered_metadatas, filtered_distances, filter_info = self._filter_by_similarity(
                 results['documents'],
                 results['metadatas'], 
                 results['distances']
@@ -153,7 +155,9 @@ class ComplianceRetriever:
                 documents=filtered_docs,
                 metadatas=filtered_metadatas,
                 distances=filtered_distances,
-                source_type='naac_requirement'
+                source_type='naac_requirement',
+                used_threshold_fallback=filter_info["used_fallback"],
+                retrieval_notes=filter_info["notes"],
             )
             
         except Exception as e:
@@ -174,7 +178,7 @@ class ComplianceRetriever:
             )
             
             # Filter results by similarity threshold
-            filtered_docs, filtered_metadatas, filtered_distances = self._filter_by_similarity(
+            filtered_docs, filtered_metadatas, filtered_distances, filter_info = self._filter_by_similarity(
                 results['documents'],
                 results['metadatas'],
                 results['distances']
@@ -184,7 +188,9 @@ class ComplianceRetriever:
                 documents=filtered_docs,
                 metadatas=filtered_metadatas,
                 distances=filtered_distances,
-                source_type='mvsr_evidence'
+                source_type='mvsr_evidence',
+                used_threshold_fallback=filter_info["used_fallback"],
+                retrieval_notes=filter_info["notes"],
             )
             
         except Exception as e:
@@ -194,11 +200,11 @@ class ComplianceRetriever:
     def _filter_by_similarity(self, 
                             documents: List[str],
                             metadatas: List[Dict[str, Any]], 
-                            distances: List[float]) -> Tuple[List[str], List[Dict[str, Any]], List[float]]:
+                            distances: List[float]) -> Tuple[List[str], List[Dict[str, Any]], List[float], Dict[str, Any]]:
         """Filter results based on similarity threshold"""
         
         if not documents or not distances:
-            return [], [], []
+            return [], [], [], {"used_fallback": False, "notes": []}
         
         # ChromaDB uses distance (lower is better), convert to similarity
         # Assuming cosine distance: similarity = 1 - distance
@@ -208,6 +214,7 @@ class ComplianceRetriever:
         filtered_docs = []
         filtered_metadatas = [] 
         filtered_distances = []
+        notes: List[str] = []
         
         for i, similarity in enumerate(similarities):
             if similarity >= self.similarity_threshold:
@@ -220,10 +227,36 @@ class ComplianceRetriever:
             filtered_metadatas,
             filtered_distances,
         )
+
+        used_fallback = False
+        if not filtered_docs:
+            fallback_count = min(3, len(documents))
+            filtered_docs, filtered_metadatas, filtered_distances = self._deduplicate_results(
+                documents[:fallback_count],
+                metadatas[:fallback_count],
+                distances[:fallback_count],
+            )
+            used_fallback = bool(filtered_docs)
+            if used_fallback:
+                best_similarity = max(similarities)
+                notes.append(
+                    "No results met the configured similarity threshold "
+                    f"({self.similarity_threshold:.2f}); preserved the top {len(filtered_docs)} "
+                    f"candidate(s) instead. Best similarity was {best_similarity:.4f}."
+                )
+                logger.warning(
+                    "No retrieval hits met similarity threshold %.2f; preserving top %s candidate(s). Best similarity %.4f",
+                    self.similarity_threshold,
+                    len(filtered_docs),
+                    best_similarity,
+                )
         
         logger.debug(f"Filtered {len(documents)} -> {len(filtered_docs)} results by similarity threshold")
         
-        return filtered_docs, filtered_metadatas, filtered_distances
+        return filtered_docs, filtered_metadatas, filtered_distances, {
+            "used_fallback": used_fallback,
+            "notes": notes,
+        }
 
     def _hybrid_rerank(
         self,
@@ -268,6 +301,8 @@ class ComplianceRetriever:
             metadatas=metadatas,
             distances=distances,
             source_type=candidates.source_type,
+            used_threshold_fallback=candidates.used_threshold_fallback,
+            retrieval_notes=candidates.retrieval_notes,
         )
 
     def _deduplicate_results(

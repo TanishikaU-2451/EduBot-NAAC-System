@@ -7,6 +7,8 @@ import {
   SchedulerStatus,
   UploadResponse,
   IngestRequest,
+  IngestStatusRequest,
+  IngestStatusResponse,
   UpdateRequest,
   ScheduleRequest,
   ApiError
@@ -86,6 +88,11 @@ class ApiService {
   // Document ingestion endpoints
   async ingestDocuments(request: IngestRequest): Promise<any> {
     const response = await this.api.post('/ingest', request)
+    return response.data
+  }
+
+  async getIngestionStatuses(request: IngestStatusRequest): Promise<IngestStatusResponse> {
+    const response: AxiosResponse<IngestStatusResponse> = await this.api.post('/ingest/status', request)
     return response.data
   }
 

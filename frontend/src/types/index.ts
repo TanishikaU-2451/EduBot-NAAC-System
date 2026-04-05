@@ -137,6 +137,29 @@ export interface IngestRequest {
   additional_metadata?: Record<string, any>
 }
 
+export interface IngestStatusRow {
+  file_path: string
+  status: 'staged' | 'queued' | 'processing' | 'completed' | 'failed' | 'unknown'
+  phase?: string
+  message: string
+  document_type?: string
+  chunks_generated?: number
+  chunks_written?: number
+  debug_trace_id?: string
+  started_at?: string
+  completed_at?: string
+  updated_at?: string
+}
+
+export interface IngestStatusRequest {
+  file_paths: string[]
+}
+
+export interface IngestStatusResponse {
+  statuses: Record<string, IngestStatusRow>
+  timestamp: string
+}
+
 // Update Request Types
 export interface UpdateRequest {
   update_type: 'incremental' | 'full' | 'criterion'

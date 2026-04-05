@@ -13,15 +13,9 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 import os
-import io
 from contextlib import asynccontextmanager
+from threading import Lock
 from uuid import uuid4
-
-try:
-    from pdfminer.high_level import extract_text as pdf_extract_text
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
 
 # Import our system components
 from ..rag.pipeline import RAGPipeline
@@ -60,6 +54,14 @@ scheduler: Optional[NAACUpdateScheduler] = None
 metadata_mapper: Optional[NAACMetadataMapper] = None
 vector_store_instance: Optional[Any] = None
 memory_store_instance: Optional[ConversationMemoryStore] = None
+ingestion_pipeline_instance: Optional[DocumentIngestionPipeline] = None
+ingestion_status_store: Dict[str, Dict[str, Any]] = {}
+ingestion_status_lock = Lock()
+ACTIVE_INGEST_STATUSES = {"queued", "processing"}
+staged_upload_store: Dict[str, Dict[str, Any]] = {}
+staged_upload_lock = Lock()
+STAGED_UPLOAD_PREFIX = "memory://upload/"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
@@ -83,9 +85,12 @@ class ComplianceResponse(BaseModel):
 
 class IngestRequest(BaseModel):
     document_type: str = Field(..., description="Document type: 'naac_requirement' or 'mvsr_evidence'")
-    file_paths: List[str] = Field(..., description="List of file paths to ingest")
+    file_paths: List[str] = Field(..., description="List of staged upload identifiers to ingest")
     force_reingest: bool = Field(False, description="Force reingest of existing documents")
     additional_metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+
+class IngestStatusRequest(BaseModel):
+    file_paths: List[str] = Field(..., description="List of staged upload identifiers to inspect")
 
 class UpdateRequest(BaseModel):
     update_type: str = Field("incremental", description="Update type: 'incremental', 'full', 'criterion'")
@@ -103,15 +108,15 @@ class UploadResponse(BaseModel):
     status: str = Field(..., description="Upload status")
     message: str = Field(..., description="Upload result message")
     filename: str = Field(..., description="Original uploaded filename")
-    stored_filename: str = Field(..., description="Filename used on the server")
-    stored_path: str = Field(..., description="Saved server file path for later ingestion")
+    stored_filename: str = Field(..., description="Display filename retained for the staged upload")
+    stored_path: str = Field(..., description="Server-side staged upload identifier for later ingestion")
     document_type: str = Field(..., description="Document type associated with the file")
     file_size: int = Field(..., description="Uploaded file size in bytes")
     timestamp: str = Field(..., description="Upload completion timestamp")
 
 
 class StagedUploadDeleteRequest(BaseModel):
-    stored_path: str = Field(..., description="Server-side staged upload path to remove")
+    stored_path: str = Field(..., description="Server-side staged upload identifier to remove")
 
 class LoginRequest(BaseModel):
     username: str = Field(..., description="Username")
@@ -164,139 +169,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# System initialization functions
-def _ingest_markdown_docs(vector_store, data_dir: Path) -> None:
-    """Ingest markdown/text documents into the vector store if empty."""
-    try:
-        def split_text_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
-            cleaned = " ".join((text or "").split())
-            if not cleaned:
-                return []
-
-            if len(cleaned) <= chunk_size:
-                return [cleaned]
-
-            chunks: List[str] = []
-            start = 0
-            step = max(chunk_size - overlap, 1)
-            while start < len(cleaned):
-                end = start + chunk_size
-                chunk = cleaned[start:end].strip()
-                if chunk:
-                    chunks.append(chunk)
-                if end >= len(cleaned):
-                    break
-                start += step
-            return chunks
-
-        chunk_size = max(settings.chunk_size, 400)
-        chunk_overlap = max(min(settings.chunk_overlap, chunk_size // 2), 50)
-
-        # Check if already populated
-        stats = vector_store.get_collection_stats()
-        naac_count = stats.get("naac_requirements_count", 0)
-        mvsr_count = stats.get("mvsr_evidence_count", 0)
-        if naac_count > 0 and mvsr_count > 0:
-            logger.info(f"Collections already have data: {naac_count} NAAC, {mvsr_count} MVSR docs. Skipping ingestion.")
-            return
-
-        # Ingest NAAC documents
-        naac_dir = data_dir / "naac_documents"
-        naac_docs: List[str] = []
-        naac_metas: List[Dict[str, Any]] = []
-        if naac_dir.exists():
-            for f in naac_dir.glob("*"):
-                if f.suffix.lower() in {".md", ".txt"}:
-                    text = f.read_text(encoding="utf-8", errors="ignore")
-                    criterion = "1"
-                    for c in ["1","2","3","4","5","6","7"]:
-                        if f"criterion_{c}" in f.name.lower() or f"criteria_{c}" in f.name.lower():
-                            criterion = c; break
-                    for chunk_idx, chunk_text in enumerate(split_text_chunks(text, chunk_size, chunk_overlap)):
-                        naac_docs.append(chunk_text)
-                        naac_metas.append({
-                            "type": "requirement",
-                            "criterion": criterion,
-                            "version": "2025",
-                            "source_file": f.name,
-                            "indicator": f"{criterion}.1",
-                            "chunk_index": chunk_idx,
-                            "storage_mode": "chunk_row",
-                        })
-
-        if naac_docs:
-            vector_store.add_naac_documents(naac_docs, naac_metas)
-            logger.info("Ingested startup NAAC corpus as %s chunk rows", len(naac_docs))
-
-        # Ingest MVSR SSR PDF from mvsr_evidence/reports/
-        ssr_dir = data_dir / "mvsr_evidence" / "reports"
-        ssr_ingested = False
-        mvsr_docs: List[str] = []
-        mvsr_metas: List[Dict[str, Any]] = []
-        if ssr_dir.exists() and PDF_SUPPORT:
-            for f in ssr_dir.glob("*.pdf"):
-                try:
-                    text = pdf_extract_text(str(f))
-                    if not text or not text.strip():
-                        logger.warning(f"No text extracted from SSR PDF: {f.name}")
-                        continue
-                    for chunk_idx, chunk_text in enumerate(split_text_chunks(text, chunk_size, chunk_overlap)):
-                        mvsr_docs.append(chunk_text)
-                        mvsr_metas.append({
-                            "type": "evidence",
-                            "criterion": "1",
-                            "document": f.stem.replace("-", " ").replace("_", " "),
-                            "year": 2019,
-                            "category": "ssr",
-                            "source_file": f.name,
-                            "chunk_index": chunk_idx,
-                            "storage_mode": "chunk_row",
-                        })
-                    logger.info("Prepared MVSR SSR PDF for aggregated ingest: %s", f.name)
-                    ssr_ingested = True
-                except Exception as pdf_err:
-                    logger.error(f"Failed to extract PDF {f.name}: {pdf_err}")
-        elif not PDF_SUPPORT:
-            logger.warning("pdfminer not available; falling back to MVSR markdown files")
-
-        # Fallback to MVSR markdown files only if SSR PDF was not ingested
-        if not ssr_ingested:
-            mvsr_dir = data_dir / "mvsr_documents"
-            if mvsr_dir.exists():
-                for f in mvsr_dir.glob("*"):
-                    if f.suffix.lower() in {".md", ".txt"}:
-                        text = f.read_text(encoding="utf-8", errors="ignore")
-                        category = "general"
-                        if "research" in f.name.lower():
-                            category = "research"
-                        elif "academic" in f.name.lower():
-                            category = "academic"
-                        for chunk_idx, chunk_text in enumerate(split_text_chunks(text, chunk_size, chunk_overlap)):
-                            mvsr_docs.append(chunk_text)
-                            mvsr_metas.append({
-                                "type": "evidence",
-                                "criterion": "1",
-                                "document": f.stem.replace("_", " "),
-                                "year": 2024,
-                                "category": category,
-                                "source_file": f.name,
-                                "chunk_index": chunk_idx,
-                                "storage_mode": "chunk_row",
-                            })
-                        logger.info("Prepared MVSR fallback file for aggregated ingest: %s", f.name)
-
-        if mvsr_docs:
-            vector_store.add_mvsr_documents(mvsr_docs, mvsr_metas)
-            logger.info("Ingested startup MVSR corpus as %s chunk rows", len(mvsr_docs))
-
-        logger.info("Startup document ingestion complete.")
-    except Exception as e:
-        logger.error(f"Startup ingestion failed (non-fatal): {e}")
-
-
 async def initialize_system():
     """Initialize all system components"""
-    global rag_pipeline, auto_ingest, scheduler, metadata_mapper, vector_store_instance, memory_store_instance
+    global rag_pipeline, auto_ingest, scheduler, metadata_mapper, vector_store_instance, memory_store_instance, ingestion_pipeline_instance
     
     try:
         # Initialize configured vector store with local fallback
@@ -374,7 +249,9 @@ async def initialize_system():
             min_chunk_length=settings.min_chunk_length,
             pdf_extraction_strategy=settings.pdf_extraction_strategy,
             pdf_extract_tables=settings.pdf_extract_tables,
+            persist_ingestion_log=settings.persist_ingestion_log,
         )
+        ingestion_pipeline_instance = ingestion_pipeline
         
         # Initialize RAG pipeline
         rag_pipeline = RAGPipeline(
@@ -395,25 +272,20 @@ async def initialize_system():
             },
         )
         
-        # Initialize auto-ingest system
-        auto_ingest = NAACAutoIngest(
-            data_dir=str(settings.get_data_path()),
-            cache_dir=str(settings.get_cache_path()),
-            chroma_store=vector_store,
-            ingestion_pipeline=ingestion_pipeline
-        )
-        
-        # Initialize scheduler
-        scheduler = NAACUpdateScheduler(auto_ingest=auto_ingest)
-        
+        if settings.auto_ingest_enabled:
+            auto_ingest = NAACAutoIngest(
+                chroma_store=vector_store,
+                ingestion_pipeline=ingestion_pipeline,
+            )
+            scheduler = NAACUpdateScheduler(auto_ingest=auto_ingest)
+            scheduler.start()
+        else:
+            auto_ingest = None
+            scheduler = None
+            logger.info("Auto-ingest and scheduler are disabled; no local data/cache directories will be created.")
+
         # Initialize metadata mapper
         metadata_mapper = NAACMetadataMapper()
-        
-        # Start scheduler
-        scheduler.start()
-        
-        # Ingest markdown knowledge base docs if collections are empty
-        await asyncio.to_thread(_ingest_markdown_docs, vector_store, settings.get_data_path())
         
         logger.info("All system components initialized")
         
@@ -466,6 +338,13 @@ def get_memory_store() -> Optional[ConversationMemoryStore]:
     return memory_store_instance
 
 
+def get_ingestion_pipeline() -> DocumentIngestionPipeline:
+    """Dependency to get the document ingestion pipeline."""
+    if ingestion_pipeline_instance is None:
+        raise HTTPException(status_code=503, detail="Document ingestion pipeline not initialized")
+    return ingestion_pipeline_instance
+
+
 def _build_memory_identity(request: QueryRequest) -> MemoryIdentity:
     return MemoryIdentity(
         tenant_id=(request.tenant_id or "default_tenant").strip() or "default_tenant",
@@ -483,6 +362,122 @@ def _build_assistant_memory_text(response: Dict[str, Any]) -> str:
     if response.get("status"):
         parts.append(f"Status: {str(response['status']).strip()}")
     return "\n\n".join([p for p in parts if p])
+
+
+def _is_staged_upload_token(file_path: str) -> bool:
+    return str(file_path or "").strip().startswith(STAGED_UPLOAD_PREFIX)
+
+
+def _create_staged_upload_token(filename: str) -> str:
+    safe_name = Path(filename or "uploaded.pdf").name
+    return f"{STAGED_UPLOAD_PREFIX}{uuid4().hex}/{safe_name}"
+
+
+def _set_staged_upload(
+    token: str,
+    *,
+    content: bytes,
+    filename: str,
+    document_type: str,
+) -> Dict[str, Any]:
+    record = {
+        "token": token,
+        "content": content,
+        "filename": Path(filename or "uploaded.pdf").name,
+        "document_type": document_type,
+        "file_size": len(content or b""),
+        "created_at": datetime.now().isoformat(),
+    }
+    with staged_upload_lock:
+        staged_upload_store[token] = record
+    return record.copy()
+
+
+def _get_staged_upload(token: str) -> Optional[Dict[str, Any]]:
+    with staged_upload_lock:
+        record = staged_upload_store.get(token)
+        return record.copy() if record else None
+
+
+def _remove_staged_upload(token: str) -> Optional[Dict[str, Any]]:
+    with staged_upload_lock:
+        record = staged_upload_store.pop(token, None)
+        return record.copy() if record else None
+
+
+def _normalize_ingestion_path(file_path: str) -> str:
+    normalized = str(file_path or "").strip()
+    if _is_staged_upload_token(normalized):
+        return normalized
+    candidate = Path(normalized)
+    if not candidate.is_absolute():
+        candidate = (PROJECT_ROOT / normalized).resolve()
+    else:
+        candidate = candidate.resolve()
+    return str(candidate)
+
+
+def _set_ingestion_status(
+    file_path: str,
+    status: str,
+    *,
+    phase: Optional[str] = None,
+    message: Optional[str] = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    normalized_path = _normalize_ingestion_path(file_path)
+    now = datetime.now().isoformat()
+
+    with ingestion_status_lock:
+        current = ingestion_status_store.get(normalized_path, {}).copy()
+        updated = {
+            **current,
+            **extra,
+            "file_path": normalized_path,
+            "status": status,
+            "updated_at": now,
+        }
+        if phase is not None:
+            updated["phase"] = phase
+        if message is not None:
+            updated["message"] = message
+        if status in ACTIVE_INGEST_STATUSES and not updated.get("started_at"):
+            updated["started_at"] = now
+        if status in {"completed", "failed"}:
+            updated["completed_at"] = now
+        ingestion_status_store[normalized_path] = updated
+        return updated.copy()
+
+
+def _remove_ingestion_status(file_path: str) -> None:
+    normalized_path = _normalize_ingestion_path(file_path)
+    with ingestion_status_lock:
+        ingestion_status_store.pop(normalized_path, None)
+
+
+def _get_ingestion_statuses(file_paths: List[str]) -> Dict[str, Dict[str, Any]]:
+    normalized_paths = [_normalize_ingestion_path(path) for path in file_paths]
+    with ingestion_status_lock:
+        return {
+            path: ingestion_status_store.get(
+                path,
+                {
+                    "file_path": path,
+                    "status": "unknown",
+                    "phase": "unknown",
+                    "message": "No ingestion status available yet.",
+                },
+            ).copy()
+            for path in normalized_paths
+        }
+
+
+def _has_active_manual_ingestion() -> bool:
+    with ingestion_status_lock:
+        return any(
+            status_row.get("status") in ACTIVE_INGEST_STATUSES
+            for status_row in ingestion_status_store.values()
+        )
 
 # API Endpoints
 
@@ -556,6 +551,12 @@ async def query_compliance(
     Process natural language queries and return structured compliance analysis
     """
     try:
+        if _has_active_manual_ingestion():
+            raise HTTPException(
+                status_code=409,
+                detail="Chunking in progress. Wait until both documents finish processing.",
+            )
+
         logger.info(f"Processing query: {request.query[:100]}...")
         
         memory_context: Optional[Dict[str, Any]] = None
@@ -617,6 +618,8 @@ async def query_compliance(
         
         return compliance_response
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Query processing failed: {e}")
         raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
@@ -625,7 +628,7 @@ async def query_compliance(
 async def ingest_documents(
     request: IngestRequest,
     background_tasks: BackgroundTasks,
-    auto_ingest_system: NAACAutoIngest = Depends(get_auto_ingest)
+    ingestion_pipeline: DocumentIngestionPipeline = Depends(get_ingestion_pipeline),
 ):
     """
     Ingest documents into the knowledge base
@@ -636,31 +639,115 @@ async def ingest_documents(
         def run_ingestion():
             """Background task for document ingestion"""
             try:
-                ingestion_pipeline = auto_ingest_system.ingestion_pipeline
-                
                 results = []
                 for raw_path in request.file_paths:
-                    # Resolve relative paths against project root so both
-                    # old relative "uploads/..." and new absolute paths work
-                    resolved = Path(raw_path)
-                    if not resolved.is_absolute():
-                        resolved = (settings.get_uploads_path().parent / raw_path).resolve()
-                    file_path = str(resolved)
-                    if not resolved.exists():
-                        logger.warning(f"Ingest: file not found at {file_path}")
-                        results.append({
-                            "file": file_path,
-                            "status": "failed",
-                            "error": f"File not found: {file_path}"
-                        })
-                        continue
-                    
-                    logger.info(f"Ingest: processing {file_path} as {request.document_type}")
-                    result = ingestion_pipeline.ingest_single_document(
-                        file_path=file_path,
+                    file_path = _normalize_ingestion_path(raw_path)
+
+                    if _is_staged_upload_token(file_path):
+                        staged_upload = _get_staged_upload(file_path)
+                        if not staged_upload:
+                            logger.warning(f"Ingest: staged upload not found for token {file_path}")
+                            _set_ingestion_status(
+                                file_path,
+                                "failed",
+                                phase="missing_upload",
+                                message="The staged upload is no longer available. Please upload the PDF again.",
+                            )
+                            results.append({
+                                "file": file_path,
+                                "status": "failed",
+                                "error": "Staged upload not found",
+                            })
+                            continue
+                        file_name = str(staged_upload.get("filename") or "uploaded.pdf")
+                    else:
+                        resolved = Path(file_path)
+                        if not resolved.exists():
+                            logger.warning(f"Ingest: file not found at {file_path}")
+                            _set_ingestion_status(
+                                file_path,
+                                "failed",
+                                phase="missing_file",
+                                message=f"File not found: {file_path}",
+                            )
+                            results.append({
+                                "file": file_path,
+                                "status": "failed",
+                                "error": f"File not found: {file_path}"
+                            })
+                            continue
+                        file_name = resolved.name
+
+                    logger.info(f"Ingest: processing {file_name} as {request.document_type}")
+                    _set_ingestion_status(
+                        file_path,
+                        "processing",
+                        phase="starting",
+                        message="Starting document extraction and chunking...",
                         document_type=request.document_type,
-                        additional_metadata=request.additional_metadata
+                        filename=file_name,
                     )
+
+                    def status_callback(update: Dict[str, Any], tracked_path: str = file_path):
+                        if not isinstance(update, dict):
+                            return
+                        next_status = str(update.get("status") or "processing")
+                        next_phase = update.get("phase")
+                        next_message = update.get("message")
+                        extra = {
+                            key: value
+                            for key, value in update.items()
+                            if key not in {"status", "phase", "message"}
+                        }
+                        _set_ingestion_status(
+                            tracked_path,
+                            next_status,
+                            phase=str(next_phase) if next_phase is not None else None,
+                            message=str(next_message) if next_message is not None else None,
+                            **extra,
+                        )
+
+                    try:
+                        if _is_staged_upload_token(file_path):
+                            result = ingestion_pipeline.ingest_staged_document(
+                                file_bytes=staged_upload["content"],
+                                file_name=file_name,
+                                staged_identifier=file_path,
+                                document_type=request.document_type,
+                                additional_metadata=request.additional_metadata,
+                                status_callback=status_callback,
+                            )
+                        else:
+                            result = ingestion_pipeline.ingest_single_document(
+                                file_path=file_path,
+                                document_type=request.document_type,
+                                additional_metadata=request.additional_metadata,
+                                status_callback=status_callback,
+                            )
+                    finally:
+                        if _is_staged_upload_token(file_path):
+                            _remove_staged_upload(file_path)
+
+                    if result.get("status") == "success":
+                        _set_ingestion_status(
+                            file_path,
+                            "completed",
+                            phase="completed",
+                            message=f"Processed into {result.get('chunks_written', 0)} chunks and stored successfully.",
+                            document_type=request.document_type,
+                            chunks_generated=result.get("chunks_generated", 0),
+                            chunks_written=result.get("chunks_written", 0),
+                            debug_trace_id=result.get("debug_trace_id"),
+                        )
+                    else:
+                        _set_ingestion_status(
+                            file_path,
+                            "failed",
+                            phase="failed",
+                            message=str(result.get("error", "Document ingestion failed.")),
+                            document_type=request.document_type,
+                            debug_trace_id=result.get("debug_trace_id"),
+                        )
                     results.append(result)
                 
                 logger.info(f"Ingestion completed: {len(results)} documents processed")
@@ -668,6 +755,18 @@ async def ingest_documents(
             except Exception as e:
                 logger.error(f"Background ingestion failed: {e}")
         
+        resolved_paths = []
+        for raw_path in request.file_paths:
+            resolved_path = _normalize_ingestion_path(raw_path)
+            resolved_paths.append(resolved_path)
+            _set_ingestion_status(
+                resolved_path,
+                "queued",
+                phase="queued",
+                message="Queued for chunking and embedding.",
+                document_type=request.document_type,
+            )
+
         # Start background ingestion
         background_tasks.add_task(run_ingestion)
         
@@ -675,12 +774,26 @@ async def ingest_documents(
             "status": "accepted",
             "message": f"Ingestion started for {len(request.file_paths)} documents",
             "document_type": request.document_type,
+            "file_paths": resolved_paths,
             "timestamp": datetime.now().isoformat()
         }
         
     except Exception as e:
         logger.error(f"Ingestion request failed: {e}")
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+
+
+@api_router.post("/ingest/status")
+async def get_ingest_status(request: IngestStatusRequest):
+    """Return current ingestion state for staged file paths."""
+    try:
+        return {
+            "statuses": _get_ingestion_statuses(request.file_paths),
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Ingestion status request failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch ingestion status: {str(e)}")
 
 @api_router.post("/force-update")
 async def force_system_update(
@@ -725,14 +838,23 @@ async def force_system_update(
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
 @api_router.get("/last-sync")
-async def get_last_sync(auto_ingest_system: NAACAutoIngest = Depends(get_auto_ingest)):
+async def get_last_sync():
     """
     Get information about the last synchronization
     
     Returns details about the most recent update operation
     """
     try:
-        status = auto_ingest_system.get_update_status()
+        if auto_ingest is None:
+            return {
+                "last_successful_update": None,
+                "recent_operations": [],
+                "system_status": "disabled",
+                "component_statistics": {},
+                "timestamp": datetime.now().isoformat()
+            }
+
+        status = auto_ingest.get_update_status()
         
         return {
             "last_successful_update": status.get("last_successful_update"),
@@ -747,16 +869,28 @@ async def get_last_sync(auto_ingest_system: NAACAutoIngest = Depends(get_auto_in
         raise HTTPException(status_code=500, detail=f"Failed to get sync status: {str(e)}")
 
 @api_router.get("/scheduler/status")
-async def get_scheduler_status(scheduler_system: NAACUpdateScheduler = Depends(get_scheduler)):
+async def get_scheduler_status():
     """Get scheduler status and job information"""
     try:
-        status = scheduler_system.get_scheduler_status()
-        jobs = scheduler_system.get_job_list()
+        if scheduler is None:
+            return {
+                "scheduler_status": {
+                    "running": False,
+                    "job_count": 0,
+                    "next_run_time": None,
+                    "uptime_hours": 0.0,
+                },
+                "jobs": [],
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        status = scheduler.get_scheduler_status()
+        jobs = scheduler.get_job_list()
 
         # Calculate uptime hours
         uptime_hours = 0.0
-        if scheduler_system.start_time and status.is_running:
-            uptime_delta = datetime.now() - scheduler_system.start_time
+        if scheduler.start_time and status.is_running:
+            uptime_delta = datetime.now() - scheduler.start_time
             uptime_hours = uptime_delta.total_seconds() / 3600
 
         # Transform jobs to match frontend expectations
@@ -924,12 +1058,19 @@ async def analyze_query_mapping(
 @api_router.get("/stats")
 async def get_system_statistics(
     pipeline: RAGPipeline = Depends(get_rag_pipeline),
-    auto_ingest_system: NAACAutoIngest = Depends(get_auto_ingest)
 ):
     """Get comprehensive system statistics"""
     try:
         pipeline_stats = pipeline.get_pipeline_stats()
-        update_status = auto_ingest_system.get_update_status()
+        update_status = (
+            auto_ingest.get_update_status()
+            if auto_ingest is not None
+            else {
+                "system_status": "disabled",
+                "message": "Auto-ingest is disabled.",
+                "recent_operations": [],
+            }
+        )
         
         return {
             "pipeline_statistics": pipeline_stats,
@@ -967,28 +1108,39 @@ async def upload_document(
     """
     try:
         # Validate file type
-        if not file.filename.lower().endswith('.pdf'):
+        if not file.filename or not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Only PDF files are supported")
-        
-        # Create upload directory
-        upload_dir = settings.get_uploads_path()
-        
+
         original_filename = Path(file.filename).name
-        stored_filename = f"{document_type}_{uuid4().hex}_{original_filename}"
-        file_path = upload_dir / stored_filename
-        
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty")
+
+        staged_token = _create_staged_upload_token(original_filename)
+        staged_record = _set_staged_upload(
+            staged_token,
+            content=content,
+            filename=original_filename,
+            document_type=document_type,
+        )
+
+        _set_ingestion_status(
+            staged_token,
+            "staged",
+            phase="staged",
+            message="File uploaded. Waiting for Upload documents.",
+            document_type=document_type,
+            filename=original_filename,
+        )
 
         return UploadResponse(
             status="staged",
-            message="File uploaded. Click Upload to start chunking and store it in the database.",
+            message="File staged in memory. Click Upload to start chunking and store it in the database.",
             filename=original_filename,
-            stored_filename=stored_filename,
-            stored_path=str(file_path.resolve()),  # Always return absolute path
+            stored_filename=staged_record["filename"],
+            stored_path=staged_token,
             document_type=document_type,
-            file_size=len(content),
+            file_size=staged_record["file_size"],
             timestamp=datetime.now().isoformat(),
         )
         
@@ -1003,19 +1155,32 @@ async def upload_document(
 async def delete_staged_upload(request: StagedUploadDeleteRequest):
     """Delete a staged upload that has not yet been ingested."""
     try:
-        upload_dir = settings.get_uploads_path().resolve()
-        stored_path = Path(request.stored_path).resolve()
+        stored_path = _normalize_ingestion_path(request.stored_path)
 
-        if upload_dir not in stored_path.parents:
+        if _is_staged_upload_token(stored_path):
+            _remove_staged_upload(stored_path)
+            _remove_ingestion_status(stored_path)
+            return {
+                "status": "deleted",
+                "message": "Staged upload removed",
+                "stored_path": stored_path,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        legacy_upload_dir = (PROJECT_ROOT / "uploads").resolve()
+        local_path = Path(stored_path).resolve()
+        if legacy_upload_dir not in local_path.parents:
             raise HTTPException(status_code=400, detail="Invalid staged upload path")
 
-        if stored_path.exists():
-            stored_path.unlink()
+        if local_path.exists():
+            local_path.unlink()
+
+        _remove_ingestion_status(str(local_path))
 
         return {
             "status": "deleted",
             "message": "Staged upload removed",
-            "stored_path": str(stored_path),
+            "stored_path": str(local_path),
             "timestamp": datetime.now().isoformat(),
         }
     except HTTPException:
@@ -1070,6 +1235,7 @@ app.add_api_route("/db/health", get_db_health, methods=["GET"])
 app.add_api_route("/upload", upload_document, methods=["POST"])
 app.add_api_route("/upload", delete_staged_upload, methods=["DELETE"])
 app.add_api_route("/ingest", ingest_documents, methods=["POST"])
+app.add_api_route("/ingest/status", get_ingest_status, methods=["POST"])
 app.add_api_route("/auth/login", login, methods=["POST"])
 app.add_api_route("/auth/logout", logout_endpoint, methods=["POST"])
 app.add_api_route("/auth/me", me, methods=["GET"])

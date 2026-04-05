@@ -84,7 +84,8 @@ def build_compliance_prompt(
     task_instructions = _build_task_instructions(response_mode)
     output_instructions = _build_output_instructions(response_mode)
 
-    return f"""You are an expert, meticulous NAAC compliance analyst.
+    return f"""You are AduBot, a focused NAAC compliance answer bot.
+Your job is to answer questions about NAAC requirements and institutional evidence using only the retrieved context.
 
 Primary task:
 {task_instructions}
@@ -99,6 +100,8 @@ Operating rules:
 7) If multiple retrieved chunks say the same thing, merge them into one point.
 8) Prefer a precise answer over an exhaustive but repetitive answer.
 9) If the user asks a narrow factual question, do not turn it into a full institutional audit.
+10) For direct factual questions, answer in the shortest correct form possible. If one line is enough, return one line only.
+11) AduBot should sound clear, exact, and helpful, not essay-like.
 
 User query:
 {user_query}
@@ -124,6 +127,7 @@ def parse_compliance_response(
     generated_text: str,
     naac_metadata: List[Dict[str, Any]],
     mvsr_metadata: List[Dict[str, Any]],
+    user_query: str = "",
 ) -> Dict[str, Any]:
     """Parse the XML-like response produced by the LLM."""
 
@@ -143,7 +147,10 @@ def parse_compliance_response(
     if not comprehensive_audit and generated_text.strip():
         comprehensive_audit = generated_text.replace("<status>", "").replace("</status>", "").replace(status, "").strip()
 
+    response_mode = _determine_response_mode(user_query)
     comprehensive_audit = _cleanup_comprehensive_audit(comprehensive_audit)
+    if response_mode == "direct_answer":
+        comprehensive_audit = _normalize_direct_answer(comprehensive_audit, user_query=user_query)
 
     parse_warnings: List[str] = []
     if not comprehensive_audit:
@@ -210,16 +217,64 @@ def _determine_response_mode(user_query: str) -> str:
         "analyze",
         "analysis",
         "evaluate",
+        "compare",
+        "comparison",
+        "difference",
+        "differences",
         "weak claim",
+        "weakness",
+        "weaknesses",
         "remediation",
         "recommendation",
         "satisfied",
+    ]
+    direct_prefixes = [
+        "what",
+        "which",
+        "who",
+        "when",
+        "where",
+        "why",
+        "how",
+        "is",
+        "are",
+        "does",
+        "do",
+        "can",
+        "did",
+        "tell me",
+        "give me",
+        "show me",
+        "list",
+        "provide",
+        "share",
+        "mention",
+    ]
+    direct_phrases = [
+        "how many",
+        "number of",
+        "count of",
+        "total number",
+        "name of",
+        "list of",
+        "which courses",
+        "which program",
+        "what is the number",
     ]
 
     if any(keyword in query for keyword in audit_keywords):
         return "audit"
 
+    if any(query.startswith(prefix) for prefix in direct_prefixes):
+        return "direct_answer"
+
+    if any(phrase in query for phrase in direct_phrases):
+        return "direct_answer"
+
     if re.match(r"^(what|which|who|when|where|why|how|is|are|does|do|can|did)\b", query):
+        return "direct_answer"
+
+    if len(query.split()) <= 12 and not query.endswith("."):
         return "direct_answer"
 
     return "audit"
@@ -228,9 +283,10 @@ def _determine_response_mode(user_query: str) -> str:
 def _build_task_instructions(response_mode: str) -> str:
     if response_mode == "direct_answer":
         return (
-            "Answer the user's exact question using the retrieved document context. "
-            "Stay direct, concise, and non-repetitive. Quote or paraphrase only what the "
-            "retrieved evidence supports, and explicitly say when the context does not contain the answer."
+            "Answer the user's exact question using the retrieved document context as AduBot. "
+            "If the answer is a single fact, count, name, date, value, or yes/no, return only that answer in one line. "
+            "Add one short supporting sentence only if it is truly needed for clarity. "
+            "Do not expand a factual question into audit sections, commentary, or long explanations."
         )
 
     return (
@@ -242,12 +298,14 @@ def _build_task_instructions(response_mode: str) -> str:
 
 def _build_output_instructions(response_mode: str) -> str:
     if response_mode == "direct_answer":
-        return """Return output using ONLY these XML tags and in this order. Write markdown inside the first tag using these exact sections:
-1. Direct Answer
-2. Supporting Evidence
-3. Missing Evidence or Uncertainty
-Keep the answer compact when the query is narrow and factual.
-<comprehensive_audit>Direct, non-repetitive answer grounded in the retrieved context.</comprehensive_audit>
+        return """Return output using ONLY these XML tags and in this order.
+For narrow factual questions:
+- Put only the answer inside <comprehensive_audit> when one line is enough.
+- Do NOT add headings such as "Direct Answer", "Supporting Evidence", "Relevant NAAC Checkpoints", or bullets unless the user explicitly asks for a detailed explanation.
+- Good example:
+<comprehensive_audit>682 courses.</comprehensive_audit>
+- If the context is incomplete, use one or two short sentences maximum.
+<comprehensive_audit>Short direct answer only, grounded in the retrieved context.</comprehensive_audit>
 <status>One of: Fully Supported, Partially Supported, Insufficient Evidence, Processing Error.</status>"""
 
     return """Audit workflow to follow:
@@ -407,3 +465,79 @@ def _normalize_signature(text: str) -> str:
     normalized = re.sub(r"\s+", " ", (text or "").strip().lower())
     normalized = re.sub(r"[^a-z0-9 ]+", "", normalized)
     return normalized
+
+
+def _normalize_direct_answer(text: str, user_query: str = "") -> str:
+    """Collapse verbose direct-answer outputs into a short bot-style answer."""
+    if not text or not text.strip():
+        return ""
+
+    extracted = _extract_direct_answer_section(text)
+    candidate = extracted or text
+    candidate = re.sub(
+        r"(?im)^\s*(?:#+\s*)?(?:\d+[.)]\s*)?(direct answer|supporting evidence|missing evidence or uncertainty)\s*$",
+        "",
+        candidate,
+    )
+
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", candidate) if part.strip()]
+    candidate = paragraphs[0] if paragraphs else candidate.strip()
+    lines = [line.strip() for line in candidate.splitlines() if line.strip()]
+    candidate = " ".join(lines)
+    candidate = re.sub(r"^(?:[-*]\s*|\d+[.)]\s*)", "", candidate).strip()
+    candidate = re.sub(r"\s+", " ", candidate)
+
+    if len(candidate) > 180:
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", candidate) if part.strip()]
+        if sentences:
+            candidate = sentences[0]
+
+    candidate = _compress_count_style_answer(candidate, user_query)
+    return candidate.strip()
+
+
+def _extract_direct_answer_section(text: str) -> str:
+    """Extract the body of a 'Direct Answer' section when the model still emits headings."""
+    lines = text.splitlines()
+    capture = False
+    captured: List[str] = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if re.match(r"^(?:#+\s*)?(?:1[.)]\s*)?direct answer\s*$", line, re.IGNORECASE):
+            capture = True
+            continue
+        if capture and re.match(
+            r"^(?:#+\s*)?(?:2[.)]\s*)?(supporting evidence|missing evidence or uncertainty)\s*$",
+            line,
+            re.IGNORECASE,
+        ):
+            break
+        if capture:
+            captured.append(raw_line)
+
+    return "\n".join(captured).strip()
+
+
+def _compress_count_style_answer(text: str, user_query: str) -> str:
+    """Shorten count-style factual answers when the query asked only for a number/value."""
+    query = (user_query or "").strip().lower()
+    if not any(phrase in query for phrase in ["how many", "number of", "count of", "total number"]):
+        return text
+
+    match = re.match(
+        r"^(?:the\s+)?(?:number|count|total number)\b.*?\b(?:is|was|are|were)\s+(.+?)(?:\s*\.)?$",
+        text.strip(),
+        re.IGNORECASE,
+    )
+    if not match:
+        return text
+
+    compressed = match.group(1).strip()
+    if not compressed:
+        return text
+
+    if len(compressed.split()) > 8:
+        return text
+
+    return compressed if compressed.endswith((".", "!", "?")) else f"{compressed}."

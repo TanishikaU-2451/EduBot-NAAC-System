@@ -125,30 +125,21 @@ EMBEDDING_MODEL=all-MiniLM-L6-v2
 EMBEDDING_DEVICE=cpu
 
 # Document Processing
-DATA_DIRECTORY=./data
-CACHE_DIRECTORY=./cache
-UPLOADS_DIRECTORY=./uploads
 CHUNK_SIZE=1000
 CHUNK_OVERLAP=200
 
 # NAAC Monitoring
 NAAC_BASE_URL=https://www.naac.gov.in
 CHECK_INTERVAL_HOURS=24
+AUTO_INGEST_ENABLED=false
+PERSIST_INGESTION_LOG=false
 
 # Security (optional)
 API_KEY=your-secure-api-key
 CORS_ORIGINS=["http://localhost:3000"]
 ```
 
-### 5. Initialize Data Directories
-
-```bash
-# Create required directories
-mkdir -p data/naac_documents data/mvsr_documents
-mkdir -p cache uploads
-```
-
-### 6. Start the System
+### 5. Start the System
 
 #### Terminal 1 - Backend API
 ```bash
@@ -172,7 +163,9 @@ npm start
 # App will open at http://localhost:3000
 ```
 
-### 7. Verify Installation
+Uploaded PDFs are staged in memory and ingested directly into the vector store. Local `uploads/`, `data/`, and `cache/` folders are not required for the normal document upload flow.
+
+### 6. Verify Installation
 
 1. **Check Supabase**: Use the Supabase dashboard (or a `SELECT` query) to confirm `public.chunks` exists and contains at least one document after ingestion.
 2. **Check Groq**: Run the Groq curl command above to ensure the key/model pair responds.

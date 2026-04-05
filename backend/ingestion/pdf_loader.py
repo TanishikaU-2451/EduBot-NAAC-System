@@ -5,6 +5,7 @@ Handles PDF extraction with metadata preservation
 
 import pdfplumber
 import PyPDF2
+import io
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import hashlib
@@ -149,6 +150,85 @@ class PDFLoader:
             self._infer_mvsr_metadata(text, file_path.name, metadata)
         
         return text, metadata
+
+    def load_pdf_bytes(
+        self,
+        file_bytes: bytes,
+        file_name: str,
+        document_type: str,
+        file_identifier: Optional[str] = None,
+    ) -> Tuple[str, DocumentMetadata]:
+        """
+        Load an in-memory PDF and extract text with metadata inference.
+
+        This avoids writing uploaded documents to the local filesystem.
+        """
+        if not file_bytes:
+            raise ValueError("Empty PDF payload received")
+
+        safe_name = Path(file_name or "uploaded.pdf").name
+        file_identifier = (file_identifier or safe_name).strip() or safe_name
+
+        estimated_pages = self._get_pdf_page_count_from_bytes(file_bytes)
+        extraction_method = None
+        text = ""
+        pages = estimated_pages
+        last_error = None
+
+        for method in self._choose_extraction_plan(estimated_pages):
+            started = time.time()
+            try:
+                if method == "pymupdf":
+                    text, pages = self._extract_with_pymupdf_bytes(file_bytes, safe_name)
+                elif method == "pdfplumber":
+                    text, pages = self._extract_with_pdfplumber_bytes(
+                        file_bytes,
+                        safe_name,
+                        extract_tables=self.extract_tables,
+                    )
+                else:
+                    text, pages = self._extract_with_pypdf2_bytes(file_bytes, safe_name)
+
+                if self._is_usable_extraction(text, pages):
+                    extraction_method = method
+                    logger.info(
+                        "Extracted %s characters using %s from in-memory PDF %s in %.2fs",
+                        len(text),
+                        method,
+                        safe_name,
+                        time.time() - started,
+                    )
+                    break
+
+                logger.warning(
+                    "%s extraction for in-memory PDF %s produced too little text (%s chars); trying fallback",
+                    method,
+                    safe_name,
+                    len(text),
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning("%s failed for in-memory PDF %s: %s", method, safe_name, exc)
+
+        if extraction_method is None:
+            logger.error("All extraction methods failed for in-memory PDF %s: %s", safe_name, last_error)
+            raise last_error or RuntimeError(f"Could not extract text from {safe_name}")
+
+        metadata = DocumentMetadata(
+            file_path=file_identifier,
+            file_name=safe_name,
+            total_pages=pages,
+            file_hash=self._calculate_content_hash(file_bytes),
+            extraction_method=extraction_method,
+            document_type=document_type,
+        )
+
+        if document_type == "naac_requirement":
+            self._infer_naac_metadata(text, safe_name, metadata)
+        elif document_type == "mvsr_evidence":
+            self._infer_mvsr_metadata(text, safe_name, metadata)
+
+        return text, metadata
     
     def _extract_with_pdfplumber(self, file_path: Path, extract_tables: Optional[bool] = None) -> Tuple[str, int]:
         """Extract text using pdfplumber (handles tables and complex layouts better)"""
@@ -184,6 +264,11 @@ class PDFLoader:
         with open(file_path, "rb") as file:
             reader = PyPDF2.PdfReader(file)
             return len(reader.pages)
+
+    def _get_pdf_page_count_from_bytes(self, file_bytes: bytes) -> int:
+        """Get PDF page count from in-memory bytes."""
+        reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+        return len(reader.pages)
 
     def _choose_extraction_plan(self, total_pages: int) -> List[str]:
         """Choose the fastest extractor order for the current document size."""
@@ -229,6 +314,23 @@ class PDFLoader:
                     logger.warning(f"Error extracting page {page_num + 1} from {file_path.name}: {e}")
                     continue
         return "\n".join(text_parts), total_pages
+
+    def _extract_with_pymupdf_bytes(self, file_bytes: bytes, file_name: str) -> Tuple[str, int]:
+        """Lightning fast extraction using PyMuPDF from raw bytes."""
+        import fitz
+
+        text_parts = []
+        with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+            total_pages = len(doc)
+            for page_num, page in enumerate(doc):
+                try:
+                    page_text = page.get_text()
+                    if page_text:
+                        text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}\n")
+                except Exception as e:
+                    logger.warning(f"Error extracting page {page_num + 1} from {file_name}: {e}")
+                    continue
+        return "\n".join(text_parts), total_pages
     
     def _extract_with_pypdf2(self, file_path: Path) -> Tuple[str, int]:
         """Fallback extraction using PyPDF2"""
@@ -247,6 +349,56 @@ class PDFLoader:
                     logger.warning(f"Error extracting page {page_num + 1} from {file_path.name}: {e}")
                     continue
         
+        return "\n".join(text_parts), total_pages
+
+    def _extract_with_pdfplumber_bytes(
+        self,
+        file_bytes: bytes,
+        file_name: str,
+        extract_tables: Optional[bool] = None,
+    ) -> Tuple[str, int]:
+        """Extract text from raw PDF bytes using pdfplumber."""
+        text_parts = []
+        include_tables = self.extract_tables if extract_tables is None else bool(extract_tables)
+
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            total_pages = len(pdf.pages)
+
+            for page_num, page in enumerate(pdf.pages):
+                try:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}\n")
+
+                    if include_tables:
+                        tables = page.extract_tables()
+                        if tables:
+                            for table_num, table in enumerate(tables):
+                                table_text = self._format_table(table)
+                                text_parts.append(
+                                    f"--- Table {table_num + 1} on Page {page_num + 1} ---\n{table_text}\n"
+                                )
+                except Exception as e:
+                    logger.warning(f"Error extracting page {page_num + 1} from {file_name}: {e}")
+                    continue
+
+        return "\n".join(text_parts), total_pages
+
+    def _extract_with_pypdf2_bytes(self, file_bytes: bytes, file_name: str) -> Tuple[str, int]:
+        """Fallback extraction using PyPDF2 from raw bytes."""
+        text_parts = []
+        reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+        total_pages = len(reader.pages)
+
+        for page_num, page in enumerate(reader.pages):
+            try:
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}\n")
+            except Exception as e:
+                logger.warning(f"Error extracting page {page_num + 1} from {file_name}: {e}")
+                continue
+
         return "\n".join(text_parts), total_pages
     
     def _format_table(self, table: List[List]) -> str:
@@ -272,6 +424,10 @@ class PDFLoader:
                 hash_sha256.update(chunk)
         
         return hash_sha256.hexdigest()[:16]  # First 16 characters
+
+    def _calculate_content_hash(self, file_bytes: bytes) -> str:
+        """Calculate SHA-256 hash of in-memory file content."""
+        return hashlib.sha256(file_bytes).hexdigest()[:16]
     
     def _infer_naac_metadata(self, text: str, filename: str, metadata: DocumentMetadata):
         """Infer NAAC-specific metadata from text content"""

@@ -9,7 +9,7 @@ import re
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from ..debug.trace_logger import get_pipeline_trace_logger
 from .chunker import DocumentChunker, TextChunk
@@ -46,6 +46,7 @@ class DocumentIngestionPipeline:
         min_chunk_length: int = 180,
         pdf_extraction_strategy: str = "auto",
         pdf_extract_tables: bool = False,
+        persist_ingestion_log: bool = False,
     ):
         """
         Initialize ingestion pipeline
@@ -79,6 +80,7 @@ class DocumentIngestionPipeline:
             ),
         )
         self.trace_logger = get_pipeline_trace_logger()
+        self.persist_ingestion_log = bool(persist_ingestion_log)
 
         # Track ingested documents to avoid duplicates
         self.ingestion_log = self._load_ingestion_log()
@@ -350,6 +352,7 @@ class DocumentIngestionPipeline:
         file_path: str,
         document_type: str,
         additional_metadata: Optional[Dict[str, Any]] = None,
+        status_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
         Ingest a single document
@@ -370,6 +373,22 @@ class DocumentIngestionPipeline:
 
         trace_id = self.trace_logger.create_trace_id("ingest", path_obj.stem)
         logger.info("Ingestion trace id: %s", trace_id)
+
+        def emit_status(status: str, phase: str, message: str, **extra: Any) -> None:
+            if not status_callback:
+                return
+            try:
+                status_callback(
+                    {
+                        "status": status,
+                        "phase": phase,
+                        "message": message,
+                        **extra,
+                    }
+                )
+            except Exception as callback_error:
+                logger.warning("Failed to publish ingestion status for %s: %s", path_obj.name, callback_error)
+
         self.trace_logger.write_json(
             trace_id,
             "00_ingest_request.json",
@@ -390,6 +409,12 @@ class DocumentIngestionPipeline:
         )
 
         try:
+            emit_status(
+                "processing",
+                "extracting",
+                "Extracting text from the PDF...",
+                debug_trace_id=trace_id,
+            )
             text, metadata = self.pdf_loader.load_pdf(str(path_obj), document_type)
 
             if additional_metadata:
@@ -417,8 +442,22 @@ class DocumentIngestionPipeline:
             )
             self.trace_logger.write_text(trace_id, "01_extracted_text.txt", text or "")
 
+            emit_status(
+                "processing",
+                "chunking",
+                "Text extracted. Building chunks...",
+                debug_trace_id=trace_id,
+                text_length=len(text or ""),
+                total_pages=total_pages,
+            )
             chunks = self._chunk_with_fallback(text, metadata_dict)
             if not chunks:
+                emit_status(
+                    "failed",
+                    "chunking",
+                    "No text chunks could be generated from this document.",
+                    debug_trace_id=trace_id,
+                )
                 self.trace_logger.write_json(
                     trace_id,
                     "02_chunk_summary.json",
@@ -444,6 +483,14 @@ class DocumentIngestionPipeline:
                 self._serialize_chunks(chunks),
             )
 
+            emit_status(
+                "processing",
+                "embedding",
+                f"Created {len(chunks)} chunks. Generating embeddings and storing them...",
+                debug_trace_id=trace_id,
+                chunks_generated=len(chunks),
+            )
+
             documents, metadatas = self._prepare_chunk_rows(chunks, metadata_dict)
             self.trace_logger.write_json(
                 trace_id,
@@ -455,6 +502,14 @@ class DocumentIngestionPipeline:
                 },
             )
             if not documents:
+                emit_status(
+                    "failed",
+                    "embedding",
+                    "Chunk cleaning removed all rows before storage.",
+                    debug_trace_id=trace_id,
+                    chunks_generated=len(chunks),
+                    chunks_written=0,
+                )
                 self.trace_logger.write_json(
                     trace_id,
                     "99_ingest_result.json",
@@ -508,12 +563,26 @@ class DocumentIngestionPipeline:
                 "metadata": metadata_dict,
                 "debug_trace_id": trace_id,
             }
+            emit_status(
+                "completed",
+                "completed",
+                f"Processed into {len(documents)} chunks and stored successfully.",
+                debug_trace_id=trace_id,
+                chunks_generated=len(chunks),
+                chunks_written=len(documents),
+            )
             self.trace_logger.write_json(trace_id, "99_ingest_result.json", result)
 
             logger.info("Successfully ingested %s as %s chunk rows", path_obj.name, len(documents))
             return result
         except Exception as e:
             logger.error("Failed to ingest document %s: %s", path_obj.name, e, exc_info=True)
+            emit_status(
+                "failed",
+                "failed",
+                str(e),
+                debug_trace_id=trace_id,
+            )
             self.trace_logger.write_error(
                 trace_id,
                 str(e),
@@ -548,6 +617,255 @@ class DocumentIngestionPipeline:
                 "last_ingestion": self.ingestion_log[-1]["timestamp"] if self.ingestion_log else None,
             },
         }
+
+    def ingest_staged_document(
+        self,
+        file_bytes: bytes,
+        file_name: str,
+        staged_identifier: str,
+        document_type: str,
+        additional_metadata: Optional[Dict[str, Any]] = None,
+        status_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Ingest a staged in-memory PDF without writing it to local disk."""
+        safe_name = Path(file_name or "uploaded.pdf").name
+        logger.info("Ingesting staged in-memory document: %s", staged_identifier)
+
+        trace_id = self.trace_logger.create_trace_id("ingest", Path(safe_name).stem)
+        logger.info("Ingestion trace id: %s", trace_id)
+
+        def emit_status(status: str, phase: str, message: str, **extra: Any) -> None:
+            if not status_callback:
+                return
+            try:
+                status_callback(
+                    {
+                        "status": status,
+                        "phase": phase,
+                        "message": message,
+                        **extra,
+                    }
+                )
+            except Exception as callback_error:
+                logger.warning("Failed to publish ingestion status for %s: %s", safe_name, callback_error)
+
+        self.trace_logger.write_json(
+            trace_id,
+            "00_ingest_request.json",
+            {
+                "timestamp": datetime.now().isoformat(),
+                "file_path": staged_identifier,
+                "document_type": document_type,
+                "additional_metadata": additional_metadata or {},
+                "chunker_config": {
+                    "default_chunk_size": self.chunker.chunk_size,
+                    "default_chunk_overlap": self.chunker.chunk_overlap,
+                    "large_document_page_threshold": self.large_document_page_threshold,
+                    "large_document_chunk_size": self.large_document_chunker.chunk_size,
+                    "large_document_chunk_overlap": self.large_document_chunker.chunk_overlap,
+                    "min_chunk_length": self.min_chunk_length,
+                },
+            },
+        )
+
+        try:
+            emit_status(
+                "processing",
+                "extracting",
+                "Extracting text from the PDF...",
+                debug_trace_id=trace_id,
+            )
+            text, metadata = self.pdf_loader.load_pdf_bytes(
+                file_bytes=file_bytes,
+                file_name=safe_name,
+                document_type=document_type,
+                file_identifier=staged_identifier,
+            )
+
+            if additional_metadata:
+                for key, value in additional_metadata.items():
+                    setattr(metadata, key, value)
+
+            metadata_dict = metadata.__dict__.copy()
+            total_pages = int(metadata_dict.get("total_pages", 1) or 1)
+            chunker_name = (
+                "large_document_chunker"
+                if total_pages >= self.large_document_page_threshold
+                else "default_chunker"
+            )
+            self.trace_logger.write_json(
+                trace_id,
+                "01_extraction_summary.json",
+                {
+                    "file": safe_name,
+                    "document_type": document_type,
+                    "text_length": len(text or ""),
+                    "total_pages": total_pages,
+                    "chunker_selected": chunker_name,
+                    "metadata": metadata_dict,
+                },
+            )
+            self.trace_logger.write_text(trace_id, "01_extracted_text.txt", text or "")
+
+            emit_status(
+                "processing",
+                "chunking",
+                "Text extracted. Building chunks...",
+                debug_trace_id=trace_id,
+                text_length=len(text or ""),
+                total_pages=total_pages,
+            )
+            chunks = self._chunk_with_fallback(text, metadata_dict)
+            if not chunks:
+                emit_status(
+                    "failed",
+                    "chunking",
+                    "No text chunks could be generated from this document.",
+                    debug_trace_id=trace_id,
+                )
+                self.trace_logger.write_json(
+                    trace_id,
+                    "02_chunk_summary.json",
+                    {
+                        "chunks_generated": 0,
+                        "message": "No chunks were produced from extracted text.",
+                    },
+                )
+                return {
+                    "file": safe_name,
+                    "status": "failed",
+                    "error": "No text extracted from document",
+                }
+
+            self.trace_logger.write_json(
+                trace_id,
+                "02_chunk_summary.json",
+                self._summarize_chunks(chunks),
+            )
+            self.trace_logger.write_json(
+                trace_id,
+                "02_chunks.json",
+                self._serialize_chunks(chunks),
+            )
+
+            emit_status(
+                "processing",
+                "embedding",
+                f"Created {len(chunks)} chunks. Generating embeddings and storing them...",
+                debug_trace_id=trace_id,
+                chunks_generated=len(chunks),
+            )
+
+            documents, metadatas = self._prepare_chunk_rows(chunks, metadata_dict)
+            self.trace_logger.write_json(
+                trace_id,
+                "03_vector_rows.json",
+                {
+                    "rows_written": len(documents),
+                    "documents": documents,
+                    "metadatas": metadatas,
+                },
+            )
+            if not documents:
+                emit_status(
+                    "failed",
+                    "embedding",
+                    "Chunk cleaning removed all rows before storage.",
+                    debug_trace_id=trace_id,
+                    chunks_generated=len(chunks),
+                    chunks_written=0,
+                )
+                self.trace_logger.write_json(
+                    trace_id,
+                    "99_ingest_result.json",
+                    {
+                        "file": safe_name,
+                        "status": "failed",
+                        "error": "No vector rows remained after chunk cleaning and deduplication.",
+                        "debug_trace_id": trace_id,
+                    },
+                )
+                return {
+                    "file": safe_name,
+                    "status": "failed",
+                    "error": "No vector rows remained after chunk cleaning and deduplication.",
+                    "debug_trace_id": trace_id,
+                }
+
+            logger.info(
+                "[DB-WRITE] About to write %d chunks for '%s' (type=%s) to vector store",
+                len(documents),
+                safe_name,
+                document_type,
+            )
+
+            if document_type == "naac_requirement":
+                self.vector_store.add_naac_documents(documents, metadatas)
+            elif document_type == "mvsr_evidence":
+                self.vector_store.add_mvsr_documents(documents, metadatas)
+            else:
+                raise ValueError(f"Invalid document type: {document_type}")
+
+            try:
+                stats = self.vector_store.get_collection_stats()
+                logger.info(
+                    "[DB-WRITE] Write complete. Vector store now has %s NAAC docs, %s MVSR docs.",
+                    stats.get("naac_requirements_count", "?"),
+                    stats.get("mvsr_evidence_count", "?"),
+                )
+            except Exception as stats_err:
+                logger.warning("[DB-WRITE] Could not fetch post-write stats: %s", stats_err)
+
+            self._log_ingestion_entry(
+                file_identifier=staged_identifier,
+                file_name=safe_name,
+                file_hash=str(metadata_dict.get("file_hash", "") or ""),
+                document_type=document_type,
+                chunk_count=len(documents),
+            )
+            result = {
+                "file": safe_name,
+                "document_type": document_type,
+                "chunks_generated": len(chunks),
+                "chunks_written": len(documents),
+                "status": "success",
+                "ingestion_timestamp": datetime.now().isoformat(),
+                "metadata": metadata_dict,
+                "debug_trace_id": trace_id,
+            }
+            emit_status(
+                "completed",
+                "completed",
+                f"Processed into {len(documents)} chunks and stored successfully.",
+                debug_trace_id=trace_id,
+                chunks_generated=len(chunks),
+                chunks_written=len(documents),
+            )
+            self.trace_logger.write_json(trace_id, "99_ingest_result.json", result)
+
+            logger.info("Successfully ingested %s as %s chunk rows", safe_name, len(documents))
+            return result
+        except Exception as e:
+            logger.error("Failed to ingest staged document %s: %s", safe_name, e, exc_info=True)
+            emit_status(
+                "failed",
+                "failed",
+                str(e),
+                debug_trace_id=trace_id,
+            )
+            self.trace_logger.write_error(
+                trace_id,
+                str(e),
+                stage="ingest_staged_document",
+                file=safe_name,
+                document_type=document_type,
+            )
+            return {
+                "file": safe_name,
+                "status": "failed",
+                "error": str(e),
+                "debug_trace_id": trace_id,
+            }
 
     def _chunk_with_fallback(self, text: str, base_metadata: Dict[str, Any]) -> List[TextChunk]:
         """Chunk text and fallback to one cleaned chunk when structural chunking yields none."""
@@ -696,16 +1014,36 @@ class DocumentIngestionPipeline:
 
     def _log_ingestion(self, file_path: Path, document_type: str, chunk_count: int):
         """Log successful document ingestion."""
+        entry = self._log_ingestion_entry(
+            file_identifier=str(file_path),
+            file_name=file_path.name,
+            file_hash=self._calculate_file_hash(file_path),
+            document_type=document_type,
+            chunk_count=chunk_count,
+        )
+        return entry
+
+    def _log_ingestion_entry(
+        self,
+        *,
+        file_identifier: str,
+        file_name: str,
+        file_hash: str,
+        document_type: str,
+        chunk_count: int,
+    ) -> Dict[str, Any]:
+        """Log successful ingestion without assuming a filesystem path."""
         entry = {
-            "file_path": str(file_path),
-            "file_name": file_path.name,
-            "file_hash": self._calculate_file_hash(file_path),
+            "file_path": file_identifier,
+            "file_name": file_name,
+            "file_hash": file_hash,
             "document_type": document_type,
             "chunk_count": chunk_count,
             "timestamp": datetime.now().isoformat(),
         }
         self.ingestion_log.append(entry)
         self._save_ingestion_log()
+        return entry
 
     def _calculate_file_hash(self, file_path: Path) -> str:
         """Calculate SHA-256 hash of file."""
@@ -717,6 +1055,8 @@ class DocumentIngestionPipeline:
 
     def _load_ingestion_log(self) -> List[Dict[str, Any]]:
         """Load ingestion log from file."""
+        if not self.persist_ingestion_log:
+            return []
         log_file = Path("ingestion_log.json")
         if log_file.exists():
             try:
@@ -728,6 +1068,8 @@ class DocumentIngestionPipeline:
 
     def _save_ingestion_log(self):
         """Save ingestion log to file."""
+        if not self.persist_ingestion_log:
+            return
         log_file = Path("ingestion_log.json")
         try:
             with open(log_file, "w", encoding="utf-8") as f:

@@ -500,6 +500,8 @@ class RAGPipeline:
         return {
             'source_type': result.source_type,
             'count': len(rows),
+            'used_threshold_fallback': result.used_threshold_fallback,
+            'notes': result.retrieval_notes or [],
             'rows': rows,
         }
     

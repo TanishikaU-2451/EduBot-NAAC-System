@@ -5,7 +5,7 @@ import { ComplianceResponse } from './types'
 
 type Role = 'system' | 'user' | 'assistant'
 type DocumentType = 'naac_requirement' | 'mvsr_evidence'
-type UploadState = 'idle' | 'staging' | 'staged' | 'ingesting' | 'queued' | 'error'
+type UploadState = 'idle' | 'staging' | 'staged' | 'ingesting' | 'queued' | 'processing' | 'completed' | 'error'
 
 interface ChatMessage {
   id: string
@@ -20,10 +20,11 @@ interface UploadedDocument {
   size: number
   uploadedAt: string
   documentType: DocumentType
-  previewUrl: string
   storedPath?: string
   storedFilename?: string
   ingestRequestedAt?: string
+  chunksGenerated?: number
+  chunksWritten?: number
   status: UploadState
   statusMessage: string
 }
@@ -56,6 +57,25 @@ const formatFileSize = (size: number) => {
 const formatDocumentCountMessage = (count: number) =>
   count === 1 ? '1 document' : `${count} documents`
 
+const pendingIngestionStates: UploadState[] = ['ingesting', 'queued', 'processing']
+
+const mapBackendIngestionStatus = (status: string): UploadState => {
+  switch (status) {
+    case 'queued':
+      return 'queued'
+    case 'processing':
+      return 'processing'
+    case 'completed':
+      return 'completed'
+    case 'failed':
+      return 'error'
+    case 'staged':
+      return 'staged'
+    default:
+      return 'queued'
+  }
+}
+
 const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: () => void }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -74,14 +94,12 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
     naac_requirement: null,
   })
   const [isUploadStarting, setIsUploadStarting] = useState(false)
-  const [previewDocumentType, setPreviewDocumentType] = useState<DocumentType | null>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
   const [isDarkMode, setIsDarkMode] = useState(false)
   
   const chatEndRef = useRef<HTMLDivElement>(null)
   const mvsrInputRef = useRef<HTMLInputElement>(null)
   const naacInputRef = useRef<HTMLInputElement>(null)
-  const previewUrls = useRef<Partial<Record<DocumentType, string>>>({})
   const activeUploadIds = useRef<Partial<Record<DocumentType, string>>>({})
 
   useEffect(() => {
@@ -112,18 +130,6 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
     return () => clearTimeout(timer)
   }, [toast])
 
-  useEffect(() => {
-    const previewUrlMap = previewUrls.current
-    return () => {
-      ;(Object.keys(previewUrlMap) as DocumentType[]).forEach((documentType) => {
-        const previewUrl = previewUrlMap[documentType]
-        if (previewUrl) {
-          URL.revokeObjectURL(previewUrl)
-        }
-      })
-    }
-  }, [])
-
   // Apply dark mode class to root html/body
   useEffect(() => {
     if (isDarkMode) {
@@ -133,10 +139,114 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
     }
   }, [isDarkMode])
 
+  useEffect(() => {
+    const trackedDocuments = (Object.entries(documents) as [DocumentType, UploadedDocument | null][])
+      .filter((entry): entry is [DocumentType, UploadedDocument] => {
+        const document = entry[1]
+        return !!document?.storedPath && pendingIngestionStates.includes(document.status)
+      })
+
+    if (!trackedDocuments.length) {
+      return
+    }
+
+    let active = true
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const pollStatuses = async () => {
+      try {
+        const trackedPaths = trackedDocuments
+          .map(([, document]) => document.storedPath)
+          .filter((path): path is string => !!path)
+
+        const statusResponse = await apiService.getIngestionStatuses({
+          file_paths: trackedPaths,
+        })
+
+        if (!active) return
+
+        setDocuments((prev) => {
+          let hasChanges = false
+          const next = { ...prev }
+
+          trackedDocuments.forEach(([documentType, document]) => {
+            const currentDocument = prev[documentType]
+            if (!currentDocument?.storedPath) {
+              return
+            }
+
+            const trackedPath = currentDocument.storedPath
+            const nextStatusRow = statusResponse.statuses[trackedPath]
+            if (!nextStatusRow) {
+              return
+            }
+
+            const nextStatus = mapBackendIngestionStatus(nextStatusRow.status)
+            const nextMessage = nextStatusRow.message || currentDocument.statusMessage
+            const nextChunksGenerated = nextStatusRow.chunks_generated ?? currentDocument.chunksGenerated
+            const nextChunksWritten = nextStatusRow.chunks_written ?? currentDocument.chunksWritten
+            const nextRequestedAt = nextStatusRow.started_at ?? currentDocument.ingestRequestedAt
+
+            if (
+              currentDocument.status === nextStatus &&
+              currentDocument.statusMessage === nextMessage &&
+              currentDocument.chunksGenerated === nextChunksGenerated &&
+              currentDocument.chunksWritten === nextChunksWritten &&
+              currentDocument.ingestRequestedAt === nextRequestedAt
+            ) {
+              return
+            }
+
+            hasChanges = true
+            next[documentType] = {
+              ...currentDocument,
+              status: nextStatus,
+              statusMessage: nextMessage,
+              ingestRequestedAt: nextRequestedAt,
+              chunksGenerated: nextChunksGenerated,
+              chunksWritten: nextChunksWritten,
+            }
+          })
+
+          return hasChanges ? next : prev
+        })
+
+        const stillProcessing = Object.values(statusResponse.statuses).some((statusRow) =>
+          ['queued', 'processing'].includes(statusRow.status)
+        )
+
+        if (active && stillProcessing) {
+          timer = setTimeout(pollStatuses, 2000)
+        }
+      } catch (error) {
+        if (!active) return
+        timer = setTimeout(pollStatuses, 3000)
+      }
+    }
+
+    void pollStatuses()
+
+    return () => {
+      active = false
+      if (timer) {
+        clearTimeout(timer)
+      }
+    }
+  }, [
+    documents.mvsr_evidence?.storedPath,
+    documents.mvsr_evidence?.status,
+    documents.naac_requirement?.storedPath,
+    documents.naac_requirement?.status,
+  ])
+
   const handleSend = async (event?: FormEvent) => {
     event?.preventDefault()
     const trimmed = inputValue.trim()
     if (!trimmed || isThinking) return
+    if (chatDisabledReason) {
+      setToast(chatDisabledReason)
+      return
+    }
 
     const userMessage: ChatMessage = {
       id: createId(),
@@ -188,25 +298,11 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
   const getInputRef = (documentType: DocumentType) =>
     documentType === 'mvsr_evidence' ? mvsrInputRef : naacInputRef
 
-  const revokePreviewUrl = (documentType: DocumentType) => {
-    const previewUrl = previewUrls.current[documentType]
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl)
-      delete previewUrls.current[documentType]
-    }
-  }
-
   const clearDocument = async (documentType: DocumentType) => {
     const currentDocument = documents[documentType]
     if (!currentDocument) return
 
     delete activeUploadIds.current[documentType]
-
-    if (previewDocumentType === documentType) {
-      setPreviewDocumentType(null)
-    }
-
-    revokePreviewUrl(documentType)
     const inputRef = getInputRef(documentType)
     if (inputRef.current) {
       inputRef.current.value = ''
@@ -217,7 +313,7 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
       [documentType]: null,
     }))
 
-    if (currentDocument.storedPath && currentDocument.status !== 'queued' && currentDocument.status !== 'ingesting') {
+    if (currentDocument.storedPath && !pendingIngestionStates.includes(currentDocument.status)) {
       try {
         await apiService.deleteStagedUpload(currentDocument.storedPath)
       } catch (error) {
@@ -236,9 +332,6 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
     const requestId = createId()
     activeUploadIds.current[documentType] = requestId
 
-    const previewUrl = URL.createObjectURL(file)
-    previewUrls.current[documentType] = previewUrl
-
     setDocuments((prev) => ({
       ...prev,
       [documentType]: {
@@ -246,7 +339,6 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
         size: file.size,
         uploadedAt: new Date().toISOString(),
         documentType,
-        previewUrl,
         status: 'staging',
         statusMessage: 'Saving file. Chunking will wait until you click Upload documents.',
       },
@@ -265,7 +357,6 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
           size: file.size,
           uploadedAt: uploadResponse.timestamp || new Date().toISOString(),
           documentType,
-          previewUrl,
           storedPath: uploadResponse.stored_path,
           storedFilename: uploadResponse.stored_filename,
           status: 'staged',
@@ -277,7 +368,6 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
       
       const detail = getErrorMessage(error)
       setToast(detail)
-      revokePreviewUrl(documentType)
       delete activeUploadIds.current[documentType]
       setDocuments((prev) => ({ ...prev, [documentType]: null }))
     }
@@ -358,7 +448,19 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
 
   const hasAnyDocument = Object.values(documents).some(Boolean)
   const hasStagedDocuments = Object.values(documents).some((document) => document?.status === 'staged')
-  const previewDocument = previewDocumentType ? documents[previewDocumentType] : null
+  const hasDocumentErrors = Object.values(documents).some((document) => document?.status === 'error')
+  const isChunkingInProgress = Object.values(documents).some((document) => document && pendingIngestionStates.includes(document.status))
+  const areBothDocumentsCompleted = (['mvsr_evidence', 'naac_requirement'] as DocumentType[]).every(
+    (documentType) => documents[documentType]?.status === 'completed'
+  )
+  const chatDisabledReason = hasDocumentErrors
+    ? 'A document failed to process. Re-upload it before chatting.'
+    : isChunkingInProgress
+      ? 'Chunking in progress. Wait until both documents finish processing.'
+      : !areBothDocumentsCompleted
+        ? 'Upload and process both documents before querying AduBot.'
+        : null
+  const isChatDisabled = !!chatDisabledReason || isThinking
 
   return (
     <div className="flex h-screen overflow-hidden font-sans text-themeLight-text bg-themeLight-bg secondary dark:text-themeDark-text dark:bg-themeDark-bg transition-colors duration-300">
@@ -477,7 +579,6 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
                     label={documentLabels[documentType]}
                     onBrowse={() => getInputRef(documentType).current?.click()}
                     onClear={() => clearDocument(documentType)}
-                    onPreview={() => setPreviewDocumentType(documentType)}
                     onDrop={(event) => handleDrop(documentType, event)}
                   />
                 ))}
@@ -537,10 +638,17 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
               </button>
               <textarea
                 className="w-full bg-themeLight-messageAI dark:bg-themeDark-messageAI border border-themeLight-border dark:border-themeDark-border rounded-2xl pl-14 pr-16 py-4 focus:outline-none focus:ring-2 focus:ring-themeLight-accent/50 dark:focus:ring-themeDark-accent/50 resize-none shadow-soft dark:shadow-soft-dark text-[15px] placeholder-gray-400 transition-all"
-                placeholder="Ask AduBot"
+                placeholder={
+                  isChunkingInProgress
+                    ? 'Chunking in progress...'
+                    : areBothDocumentsCompleted
+                      ? 'Ask AduBot'
+                      : 'Upload and process both documents before chatting'
+                }
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 rows={1}
+                disabled={!!chatDisabledReason}
                 style={{ minHeight: '60px', maxHeight: '200px' }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
@@ -551,13 +659,17 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
               />
               <button
                 type="submit"
-                disabled={!inputValue.trim() || isThinking}
+                disabled={!inputValue.trim() || isChatDisabled}
                 className="absolute right-4 w-8 h-8 flex items-center justify-center rounded-xl bg-themeLight-buttonPrimary dark:bg-themeDark-buttonPrimary hover:bg-themeLight-buttonHover dark:hover:bg-themeDark-buttonHover text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
               </button>
             </form>
-            <p className="text-center text-xs text-gray-400 mt-3 font-medium">EduBot is an AI assistant and may occasionally make mistakes.</p>
+            {chatDisabledReason ? (
+              <p className="text-center text-xs text-amber-600 dark:text-amber-400 mt-3 font-medium">{chatDisabledReason}</p>
+            ) : (
+              <p className="text-center text-xs text-green-600 dark:text-green-400 mt-3 font-medium">Both documents are ready. You can start chatting.</p>
+            )}
           </div>
         </div>
       </main>
@@ -568,39 +680,33 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
           {toast}
         </div>
       )}
-
-      {/* Document Preview Modal */}
-      {previewDocument && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 md:p-12">
-          <div className="bg-themeLight-bg dark:bg-themeDark-bg rounded-2xl shadow-2xl w-full max-w-6xl h-full flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between p-4 border-b border-themeLight-border dark:border-themeDark-border">
-              <div>
-                <p className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-1">Previewing</p>
-                <h3 className="font-medium text-lg truncate max-w-lg">{previewDocument.name}</h3>
-              </div>
-              <button onClick={() => setPreviewDocumentType(null)} className="p-2 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 bg-gray-100 dark:bg-gray-800 rounded-xl transition-colors">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-              </button>
-            </div>
-            <iframe src={previewDocument.previewUrl} title={previewDocument.name} className="flex-1 w-full border-none bg-gray-100" />
-          </div>
-        </div>
-      )}
     </div>
   )
 }
 
-const UploadSlot = ({ document, label, onBrowse, onClear, onPreview, onDrop }: {
+const UploadSlot = ({ document, label, onBrowse, onClear, onDrop }: {
   document: UploadedDocument | null
   label: string
   onBrowse: () => void
   onClear: () => Promise<void> | void
-  onPreview: () => void
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void
 }) => {
   const isClickable = !document;
-  const isClearVisible = !!document && document.status !== 'queued' && document.status !== 'ingesting';
-
+  const isClearVisible = !!document && !pendingIngestionStates.includes(document.status);
+  const chunkSummary = document?.chunksWritten
+    ? `${document.chunksWritten} chunks stored`
+    : document?.chunksGenerated
+      ? `${document.chunksGenerated} chunks prepared`
+      : null
+  const statusLabel = document
+    ? document.status === 'staged'
+      ? 'Ready to upload'
+      : document.status === 'completed'
+        ? chunkSummary
+          ? `Ready for chat • ${chunkSummary}`
+          : 'Ready for chat'
+        : document.statusMessage || document.status
+    : ''
   return (
     <div
       onClick={isClickable ? onBrowse : undefined}
@@ -622,13 +728,10 @@ const UploadSlot = ({ document, label, onBrowse, onClear, onPreview, onDrop }: {
               <p className="text-xs text-gray-500 mt-1 flex items-center gap-2">
                 <span>{formatFileSize(document.size)}</span>
                 <span className="w-1 h-1 rounded-full bg-gray-300"></span>
-                <span className={`capitalize ${document.status === 'staged' ? 'text-green-600 dark:text-green-500' : ''}`}>{document.status === 'staged' ? 'Ready' : document.statusMessage || document.status}</span>
+                <span className={`${document.status === 'staged' || document.status === 'completed' ? 'text-green-600 dark:text-green-500' : document.status === 'error' ? 'text-red-600 dark:text-red-400' : ''}`}>{statusLabel}</span>
               </p>
             </div>
-            <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button type="button" onClick={(e) => { e.stopPropagation(); onPreview() }} className="p-1.5 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors" title="Preview">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-              </button>
+            <div className="flex items-center gap-2">
               {isClearVisible && (
                 <button type="button" onClick={(e) => { e.stopPropagation(); void onClear() }} className="p-1.5 text-red-400 hover:text-red-600 transition-colors" title="Remove">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
