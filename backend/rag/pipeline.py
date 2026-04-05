@@ -324,6 +324,10 @@ class RAGPipeline:
         """Detect narrow factual questions that should stay answer-focused."""
         if re.match(r"^(what|which|who|when|where|why|how|is|are|does|do|can|did)\b", query):
             return True
+        if any(phrase in query for phrase in ["how many", "number of", "count of", "total number"]):
+            return True
+        if re.match(r"^(number of|count of|total number|list of|name of)\b", query):
+            return True
         return query.endswith("?")
     
     def _retrieve_context(self, query_context: QueryContext) -> tuple[RetrievalResult, RetrievalResult]:
@@ -382,6 +386,31 @@ class RAGPipeline:
                     k_naac=3,
                     k_mvsr=7  # More MVSR docs for evidence queries
                 )
+
+        elif query_context.query_type == 'gap_analysis':
+            criterion = query_context.suggested_filters.get('criterion_filter')
+            category = query_context.suggested_filters.get('category_filter')
+
+            # Gap analysis needs broader evidence coverage for metric-wise findings.
+            if self.retrieval_mode == 'dense':
+                return self.retriever.retrieve_compliance_context(
+                    query_context.processed_query,
+                    k_naac=8,
+                    k_mvsr=8,
+                    criterion_filter=criterion,
+                    category_filter=category,
+                )
+
+            return self.retriever.retrieve_compliance_context_hybrid(
+                query_context.processed_query,
+                k_naac=8,
+                k_mvsr=8,
+                criterion_filter=criterion,
+                category_filter=category,
+                dense_weight=self.dense_weight,
+                lexical_weight=self.lexical_weight,
+                candidate_multiplier=self.candidate_multiplier,
+            )
         
         # Default retrieval
         return retrieve_default(

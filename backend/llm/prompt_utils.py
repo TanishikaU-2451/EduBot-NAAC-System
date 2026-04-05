@@ -48,6 +48,18 @@ def build_compliance_prompt(
         else "No retrieved context is available. Mark evidence sufficiency as low and avoid unsupported claims."
     )
 
+    source_extract_block = _build_source_extract_block(
+        naac_context=naac_context,
+        naac_metadata=naac_metadata,
+        mvsr_context=mvsr_context,
+        mvsr_metadata=mvsr_metadata,
+    )
+
+    naac_metric_ids = _collect_metric_ids(naac_context, naac_metadata)
+    mvsr_metric_ids = _collect_metric_ids(mvsr_context, mvsr_metadata)
+    naac_metric_snapshot = ", ".join(naac_metric_ids[:20]) if naac_metric_ids else "None detected"
+    mvsr_metric_snapshot = ", ".join(mvsr_metric_ids[:20]) if mvsr_metric_ids else "None detected"
+
     naac_meta_summary = _summarize_metadata(
         naac_metadata[:5],
         [("criterion", "criterion"), ("indicator", "indicator"), ("section_header", "section")],
@@ -102,6 +114,9 @@ Operating rules:
 9) If the user asks a narrow factual question, do not turn it into a full institutional audit.
 10) For direct factual questions, answer in the shortest correct form possible. If one line is enough, return one line only.
 11) AduBot should sound clear, exact, and helpful, not essay-like.
+12) In audit mode, every major finding must include at least one source citation tag like [NAAC-2] or [MVSR-4].
+13) In audit mode, map findings to criterion and metric IDs whenever present (for example 2.3.1, 6.5.2). If unavailable, write "Metric ID not found in retrieved context".
+14) In audit mode, quantify evidence gaps whenever possible (counts, percentages, years, accepted vs rejected values).
 
 User query:
 {user_query}
@@ -113,11 +128,18 @@ Retrieved metadata snapshot:
 - NAAC: {naac_meta_summary}
 - College evidence: {mvsr_meta_summary}
 
+Retrieved metric snapshot:
+- NAAC metric IDs: {naac_metric_snapshot}
+- College evidence metric IDs: {mvsr_metric_snapshot}
+
 Conversation memory:
 {memory_block}
 
 Retrieved context:
 {context_block}
+
+Source extracts for citation (use these IDs in your answer):
+{source_extract_block}
 
 {output_instructions}
 """
@@ -207,13 +229,11 @@ def _format_chunk_label(
 
 def _determine_response_mode(user_query: str) -> str:
     query = (user_query or "").strip().lower()
-    audit_keywords = [
+    strong_audit_keywords = [
         "audit",
-        "compliance",
+        "compliance analysis",
+        "compliance gap",
         "gap",
-        "checkpoint",
-        "condition",
-        "criterion",
         "analyze",
         "analysis",
         "evaluate",
@@ -227,6 +247,10 @@ def _determine_response_mode(user_query: str) -> str:
         "remediation",
         "recommendation",
         "satisfied",
+        "dvv",
+        "scoring",
+        "score risk",
+        "eligibility",
     ]
     direct_prefixes = [
         "what",
@@ -250,6 +274,13 @@ def _determine_response_mode(user_query: str) -> str:
         "share",
         "mention",
     ]
+    statement_direct_prefixes = [
+        "number of",
+        "count of",
+        "total number",
+        "list of",
+        "name of",
+    ]
     direct_phrases = [
         "how many",
         "number of",
@@ -262,10 +293,13 @@ def _determine_response_mode(user_query: str) -> str:
         "what is the number",
     ]
 
-    if any(keyword in query for keyword in audit_keywords):
+    if any(keyword in query for keyword in strong_audit_keywords):
         return "audit"
 
     if any(query.startswith(prefix) for prefix in direct_prefixes):
+        return "direct_answer"
+
+    if any(query.startswith(prefix) for prefix in statement_direct_prefixes):
         return "direct_answer"
 
     if any(phrase in query for phrase in direct_phrases):
@@ -274,10 +308,64 @@ def _determine_response_mode(user_query: str) -> str:
     if re.match(r"^(what|which|who|when|where|why|how|is|are|does|do|can|did)\b", query):
         return "direct_answer"
 
+    if _looks_like_short_factual_statement(query):
+        return "direct_answer"
+
     if len(query.split()) <= 12 and not query.endswith("."):
         return "direct_answer"
 
     return "audit"
+
+
+def _looks_like_short_factual_statement(query: str) -> bool:
+    """Detect compact factual prompts that should return short direct answers."""
+    words = [word for word in re.findall(r"[a-z0-9%]+", query) if word]
+    if not words:
+        return False
+
+    if len(words) > 16:
+        return False
+
+    factual_markers = {
+        "number",
+        "count",
+        "total",
+        "list",
+        "name",
+        "courses",
+        "course",
+        "students",
+        "student",
+        "faculty",
+        "program",
+        "programs",
+        "year",
+        "years",
+        "percentage",
+        "percent",
+        "ratio",
+    }
+
+    audit_markers = {
+        "gap",
+        "audit",
+        "analysis",
+        "analyze",
+        "evaluate",
+        "compare",
+        "comparison",
+        "remediation",
+        "weakness",
+        "dvv",
+        "risk",
+        "eligibility",
+        "compliance",
+    }
+
+    if any(marker in query for marker in audit_markers):
+        return False
+
+    return any(marker in words for marker in factual_markers)
 
 
 def _build_task_instructions(response_mode: str) -> str:
@@ -290,9 +378,9 @@ def _build_task_instructions(response_mode: str) -> str:
         )
 
     return (
-        "Critically verify whether the college/university report satisfies applicable NAAC requirements. "
-        "Identify specific mistakes, missing evidence, weak claims, or contradictions, and provide exact "
-        "corrective actions. Be thorough but non-repetitive."
+        "Critically verify whether the college or university report satisfies applicable NAAC requirements using a metric-based audit style. "
+        "Map every material gap to criterion and metric IDs, compare SSR claims vs retrieved accepted evidence, explain likely DVV-style downgrades, "
+        "and provide exact corrective actions with evidence format, owner role, and timeline. Be thorough but non-repetitive."
     )
 
 
@@ -301,6 +389,8 @@ def _build_output_instructions(response_mode: str) -> str:
         return """Return output using ONLY these XML tags and in this order.
 For narrow factual questions:
 - Put only the answer inside <comprehensive_audit> when one line is enough.
+- Return exactly one line when the answer is a single value (for example "682 courses.").
+- Do not add bullets, headings, numbering, or section labels.
 - Do NOT add headings such as "Direct Answer", "Supporting Evidence", "Relevant NAAC Checkpoints", or bullets unless the user explicitly asks for a detailed explanation.
 - Good example:
 <comprehensive_audit>682 courses.</comprehensive_audit>
@@ -309,23 +399,32 @@ For narrow factual questions:
 <status>One of: Fully Supported, Partially Supported, Insufficient Evidence, Processing Error.</status>"""
 
     return """Audit workflow to follow:
-A) Extract the relevant NAAC conditions/checkpoints for this query.
-B) Merge overlapping or duplicate conditions into one checkpoint before writing the answer.
-C) Check each unique checkpoint against available college evidence.
-D) Mark each checkpoint as Satisfied / Partially Satisfied / Not Satisfied / Insufficient Evidence.
-E) Identify specific mistakes, unsupported claims, gaps, or contradictions.
-F) Provide prioritized remediation steps with exact additions needed.
-G) Remove duplicate bullets, duplicate paragraphs, and duplicate conclusions before finalizing the answer.
+A) Extract relevant NAAC checkpoints and metric IDs from the retrieved context.
+B) Build a metric-wise matrix with NAAC expectation, SSR claim, retrieved evidence, and gap status.
+C) For each row, cite at least one source ID like [NAAC-1] or [MVSR-3].
+D) Explain claim-vs-accepted mismatch in DVV style: what was claimed, what is supported, what is rejected or unsupported.
+E) Quantify every possible deficiency (counts, percentages, number of years, number of documents, pending submissions).
+F) Name missing document artifacts explicitly (for example signed IQAC minutes, LMS logs, AQAR year-wise files, audit reports, utilization certificates).
+G) Provide corrective actions that are executable: owner role, exact evidence format, timeline, and acceptance check.
+H) Remove duplicate bullets, duplicate paragraphs, and duplicate conclusions before finalizing.
 
 Return output using ONLY these XML tags and in this order. Write markdown inside the first tag using these exact sections:
-1. Relevant NAAC Checkpoints
-2. Audit Findings
-3. Specific Weak Claims or Gaps
-4. Prioritized Remediation Steps
-5. Missing or Insufficient Evidence
+1. Criterion-wise Metric Gap Matrix
+2. Metric-wise Findings (Claim vs Retrieved Evidence vs DVV Risk)
+3. Document-Level Missing Evidence
+4. Prioritized Corrective Action Plan
+5. Eligibility and Scoring Risk Summary
 6. Conclusion
-In "Audit Findings", merge duplicate conditions as a combined finding such as "Conditions 1-3" when the evidence and judgment are the same.
-<comprehensive_audit>Single, unified audit. No repeated headings, no repeated bullets, no repeated recommendations, no repeated conclusion sentences.</comprehensive_audit>
+
+Formatting rules inside <comprehensive_audit>:
+- In section 1, include a markdown table with columns:
+    Criterion | Metric ID | NAAC Expectation (quoted) | SSR Claim (quoted) | Retrieved Evidence (quoted) | Gap Status | Citation
+- Use exact quote snippets from retrieved text for NAAC expectation and SSR claim whenever possible.
+- If a metric ID is not present in retrieved context, write "Metric ID not found in retrieved context".
+- In section 4, each action must include: Owner, Evidence to produce, Format, Deadline.
+- Keep content specific and extracted, not generic.
+
+<comprehensive_audit>Single, unified metric-based audit with mandatory citations and actionable remediation.</comprehensive_audit>
 <status>One of: Fully Supported, Partially Supported, Gap Identified, Insufficient Evidence, Processing Error.</status>"""
 
 
@@ -362,6 +461,98 @@ def _summarize_metadata(
         summary_parts.append(entry)
 
     return " | ".join(summary_parts)
+
+
+def _build_source_extract_block(
+    naac_context: List[str],
+    naac_metadata: List[Dict[str, Any]],
+    mvsr_context: List[str],
+    mvsr_metadata: List[Dict[str, Any]],
+) -> str:
+    """Build a citation-ready source extract list to reduce generic responses."""
+    lines: List[str] = []
+
+    for idx, (text, meta) in enumerate(zip(naac_context[:6], naac_metadata[:6]), start=1):
+        descriptor = _build_extract_descriptor(meta)
+        excerpt = _truncate_extract(text, max_length=260)
+        lines.append(f"[NAAC-{idx}] {descriptor}\nExcerpt: \"{excerpt}\"")
+
+    for idx, (text, meta) in enumerate(zip(mvsr_context[:8], mvsr_metadata[:8]), start=1):
+        descriptor = _build_extract_descriptor(meta)
+        excerpt = _truncate_extract(text, max_length=260)
+        lines.append(f"[MVSR-{idx}] {descriptor}\nExcerpt: \"{excerpt}\"")
+
+    if not lines:
+        return "No source extracts available."
+    return "\n\n".join(lines)
+
+
+def _build_extract_descriptor(metadata: Dict[str, Any]) -> str:
+    criterion = str(metadata.get("criterion", "") or "").strip()
+    indicator = str(metadata.get("indicator", "") or "").strip()
+    section = str(metadata.get("section_header", "") or "").strip()
+    source_file = str(metadata.get("source_file") or metadata.get("file_name") or metadata.get("document") or metadata.get("document_title") or "").strip()
+    start_page = metadata.get("start_page")
+    end_page = metadata.get("end_page")
+
+    parts: List[str] = []
+    if criterion:
+        parts.append(f"criterion={criterion}")
+    if indicator:
+        parts.append(f"metric={indicator}")
+    if section:
+        parts.append(f"section={section}")
+    if source_file:
+        parts.append(f"source={source_file}")
+
+    if start_page not in (None, "", "N/A"):
+        if end_page not in (None, "", "N/A") and end_page != start_page:
+            parts.append(f"pages={start_page}-{end_page}")
+        else:
+            parts.append(f"page={start_page}")
+
+    return " | ".join(parts) if parts else "no metadata"
+
+
+def _truncate_extract(text: str, max_length: int = 260) -> str:
+    normalized = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max_length - 3].rstrip() + "..."
+
+
+def _collect_metric_ids(context_rows: List[str], metadata_rows: List[Dict[str, Any]]) -> List[str]:
+    """Collect criterion or metric IDs from both metadata and raw chunk text."""
+    metric_ids = set()
+
+    for metadata in metadata_rows:
+        indicator = str(metadata.get("indicator", "") or "").strip()
+        if indicator:
+            for metric_id in _extract_metric_ids(indicator):
+                metric_ids.add(metric_id)
+
+        criterion = str(metadata.get("criterion", "") or "").strip()
+        if criterion and re.fullmatch(r"[1-7]", criterion):
+            metric_ids.add(f"{criterion}.x.x")
+
+    for row in context_rows:
+        for metric_id in _extract_metric_ids(row):
+            metric_ids.add(metric_id)
+
+    return sorted(metric_ids, key=_metric_sort_key)
+
+
+def _extract_metric_ids(text: str) -> List[str]:
+    pattern = re.compile(r"\b[1-7]\.\d(?:\.\d)?\b")
+    return sorted(set(pattern.findall(text or "")), key=_metric_sort_key)
+
+
+def _metric_sort_key(metric: str) -> tuple[int, int, int]:
+    parts = metric.split(".")
+    numeric_parts = [int(part) for part in parts if part.isdigit()]
+    while len(numeric_parts) < 3:
+        numeric_parts.append(0)
+    return numeric_parts[0], numeric_parts[1], numeric_parts[2]
 
 
 def _cleanup_comprehensive_audit(text: str) -> str:
@@ -493,6 +684,7 @@ def _normalize_direct_answer(text: str, user_query: str = "") -> str:
             candidate = sentences[0]
 
     candidate = _compress_count_style_answer(candidate, user_query)
+    candidate = _extract_compact_factual_answer(candidate, user_query)
     return candidate.strip()
 
 
@@ -522,7 +714,7 @@ def _extract_direct_answer_section(text: str) -> str:
 def _compress_count_style_answer(text: str, user_query: str) -> str:
     """Shorten count-style factual answers when the query asked only for a number/value."""
     query = (user_query or "").strip().lower()
-    if not any(phrase in query for phrase in ["how many", "number of", "count of", "total number"]):
+    if not _is_count_style_query(query):
         return text
 
     match = re.match(
@@ -541,3 +733,74 @@ def _compress_count_style_answer(text: str, user_query: str) -> str:
         return text
 
     return compressed if compressed.endswith((".", "!", "?")) else f"{compressed}."
+
+
+def _extract_compact_factual_answer(text: str, user_query: str) -> str:
+    """Force direct answers into a compact single-line factual output when possible."""
+    candidate = re.sub(r"\s+", " ", (text or "")).strip()
+    if not candidate:
+        return ""
+
+    query = (user_query or "").strip().lower()
+    if _is_count_style_query(query):
+        compact = _extract_numeric_value_with_unit(candidate, query)
+        if compact:
+            return compact
+
+    if len(candidate) > 180:
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", candidate) if part.strip()]
+        if sentences:
+            candidate = sentences[0]
+
+    if not candidate.endswith((".", "!", "?")):
+        candidate = f"{candidate}."
+
+    return candidate
+
+
+def _is_count_style_query(query: str) -> bool:
+    return any(phrase in query for phrase in ["how many", "number of", "count of", "total number"])
+
+
+def _extract_numeric_value_with_unit(text: str, query: str) -> str:
+    """Extract the tightest number+unit phrase for count-style direct answers."""
+    # Pattern 1: explicit result clause.
+    clause_match = re.search(
+        r"(?:is|are|was|were|:|=)\s*([0-9][0-9,]*(?:\.[0-9]+)?\s+[a-zA-Z%][a-zA-Z0-9%\- ]{0,28})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if clause_match:
+        compact = clause_match.group(1).strip()
+        compact = re.sub(r"\s+", " ", compact)
+        return compact if compact.endswith((".", "!", "?")) else f"{compact}."
+
+    unit_map = [
+        ("course", r"courses?"),
+        ("student", r"students?"),
+        ("faculty", r"faculty"),
+        ("program", r"programs?"),
+        ("year", r"years?"),
+        ("percent", r"%|percent"),
+        ("percentage", r"%|percent"),
+    ]
+
+    selected_unit_pattern = r"courses?|students?|faculty|programs?|years?|%|percent"
+    for query_token, unit_pattern in unit_map:
+        if query_token in query:
+            selected_unit_pattern = unit_pattern
+            break
+
+    fallback_match = re.search(
+        rf"\b([0-9][0-9,]*(?:\.[0-9]+)?)\s+({selected_unit_pattern})\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if fallback_match:
+        value = fallback_match.group(1)
+        unit = fallback_match.group(2)
+        compact = f"{value} {unit}".strip()
+        compact = re.sub(r"\s+", " ", compact)
+        return compact if compact.endswith((".", "!", "?")) else f"{compact}."
+
+    return ""
