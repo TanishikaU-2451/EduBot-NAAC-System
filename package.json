@@ -1,0 +1,16 @@
+{
+  "name": "edubot-naac-system-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:web": "npm --prefix apps/web run dev",
+    "build:web": "npm --prefix apps/web run build",
+    "test:web": "npm --prefix apps/web test",
+    "install:web": "npm --prefix apps/web install",
+    "dev:api": "python -m apps.backend.run_server",
+    "test:backend": "python -m pytest tests/test_prompt_utils.py"
+  }
+}

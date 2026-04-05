@@ -11,32 +11,27 @@
     "@testing-library/react": "^13.4.0",
     "@testing-library/user-event": "^13.5.0",
     "@types/jest": "^27.5.2",
-    "@types/node": "^16.18.40",
+    "@types/node": "^20.17.57",
     "@types/react": "^18.2.37",
     "@types/react-dom": "^18.2.15",
     "@types/uuid": "^9.0.7",
     "axios": "^1.6.2",
+    "edubot-naac-system-monorepo": "file:../..",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^9.0.1",
     "react-router-dom": "^6.20.1",
-    "react-scripts": "5.0.1",
     "recharts": "^2.8.0",
     "typescript": "^4.9.5",
     "uuid": "^9.0.1",
     "web-vitals": "^2.1.4"
   },
   "scripts": {
-    "start": "cross-env NODE_OPTIONS=--no-deprecation react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
-  },
-  "eslintConfig": {
-    "extends": [
-      "react-app",
-      "react-app/jest"
-    ]
+    "dev": "vite",
+    "start": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "echo \"No frontend tests configured\""
   },
   "browserslist": {
     "production": [
@@ -53,12 +48,12 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
     "@tailwindcss/typography": "^0.5.19",
-    "@types/react-syntax-highlighter": "^15.5.10",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.27",
-    "cross-env": "^10.1.0",
-    "http-proxy-middleware": "^3.0.5",
     "postcss": "^8.5.8",
-    "react-syntax-highlighter": "^15.5.0",
-    "tailwindcss": "^3.4.17"
+    "react-syntax-highlighter": "^16.1.1",
+    "tailwindcss": "^3.4.17",
+    "vite": "^5.4.10"
   }
 }

@@ -6,20 +6,24 @@ import sys
 import os
 from pathlib import Path
 
-# Add the parent directory (EduBot) to the Python path
+# Add both repo root and apps directory to the Python path.
 backend_dir = Path(__file__).parent
-project_root = backend_dir.parent
-sys.path.insert(0, str(project_root))
+apps_dir = backend_dir.parent
+repo_root = apps_dir.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+if str(apps_dir) not in sys.path:
+    sys.path.insert(0, str(apps_dir))
 
 # Now we can import the backend modules with proper paths
-from backend.api.main import app
+from apps.backend.api.main import app
 
 if __name__ == "__main__":
     import uvicorn
     
     # Get settings
     try:
-        from backend.config.settings import settings
+        from apps.backend.config.settings import settings
         uvicorn.run(
             app, 
             host=settings.host, 

@@ -2,6 +2,24 @@
 
 A sophisticated **Retrieval-Augmented Generation (RAG) platform** designed to understand NAAC requirements, retrieve MVSR institutional evidence, and map MVSR practices to NAAC criteria with automatic updates and semantic reasoning.
 
+## Monorepo Layout
+
+This project now uses a monorepo structure:
+
+```
+apps/
+   backend/   # FastAPI, ingestion, retrieval, scheduler, updater
+   web/       # React TypeScript frontend
+api/         # Vercel Python function entrypoint (catch-all)
+requirements.txt
+vercel.json
+```
+
+Notes:
+- Use `apps/backend` as the backend source root.
+- Use `apps/web` as the frontend source root.
+- Root `api/[...path].py` is used by Vercel to route backend API requests.
+
 ## 🎯 System Overview
 
 This is **NOT a generic chatbot** but a specialized compliance intelligence system that:
@@ -15,7 +33,7 @@ This is **NOT a generic chatbot** but a specialized compliance intelligence syst
 ## 🏗️ Architecture
 
 ### Backend Components
-- **FastAPI REST API**: Orchestrates ingestion, retrieval, scheduling, and monitoring through HTTP endpoints
+- **FastAPI REST API (`apps/backend`)**: Orchestrates ingestion, retrieval, scheduling, and monitoring through HTTP endpoints
 - **Supabase PostgreSQL + pgvector store**: Maintains NAAC requirements and MVSR evidence as aggregated vectors (see `db_schema.txt`) to support hybrid similarity search
 - **Groq API**: Hosts the Llama 70B conversational model that generates structured compliance analysis
 - **RAG Pipeline**: Combines Supabase retrieval with Groq generation plus metadata mapping and scoring
@@ -24,7 +42,7 @@ This is **NOT a generic chatbot** but a specialized compliance intelligence syst
 - **Document Processing**: PDF/text chunking, cleaning, and single-row consolidation before vector upsert
 
 ### Frontend Components  
-- **React TypeScript App**: Modern Material-UI interface
+- **React TypeScript App (`apps/web`)**: Modern Material-UI interface
 - **Chat Interface**: Natural language query processing with structured responses
 - **System Dashboard**: Real-time monitoring of health, statistics, and operations
 - **Document Upload**: PDF ingestion for NAAC and MVSR documents
@@ -82,7 +100,7 @@ pip install -r requirements.txt
 
 ```bash
 # Navigate to frontend directory
-cd frontend
+cd apps/web
 
 # Install dependencies
 npm install
@@ -103,11 +121,13 @@ cp .env.example .env
 Edit `.env` file with your settings:
 
 ```env
-# Application Configuration
+# Application
 APP_NAME="NAAC Compliance Intelligence System"
 DEBUG=false
 HOST=0.0.0.0
 PORT=8000
+SERVERLESS_MODE=false
+INGEST_INLINE_ON_SERVERLESS=true
 
 # Vector Backend
 VECTOR_BACKEND=supabase
@@ -133,10 +153,18 @@ NAAC_BASE_URL=https://www.naac.gov.in
 CHECK_INTERVAL_HOURS=24
 AUTO_INGEST_ENABLED=false
 PERSIST_INGESTION_LOG=false
+SERVERLESS_STATE_ENABLED=true
+STAGED_UPLOAD_TTL_MINUTES=45
+INGESTION_STATUS_TTL_HOURS=24
 
 # Security (optional)
 API_KEY=your-secure-api-key
+AUTH_TOKEN_SECRET=replace-with-a-long-random-secret
+AUTH_TOKEN_TTL_HOURS=8
 CORS_ORIGINS=["http://localhost:3000"]
+
+# Frontend (Vite) optional override
+VITE_API_BASE_URL=
 ```
 
 ### 5. Start the System
@@ -147,23 +175,61 @@ CORS_ORIGINS=["http://localhost:3000"]
 # Windows: naac_env\Scripts\activate
 # macOS/Linux: source naac_env/bin/activate
 
-# Start FastAPI server
-cd backend
-python -m api.main
+# Start FastAPI server from repo root
+python -m apps.backend.run_server
 
 # Server will start at http://localhost:8000
 ```
 
-#### Terminal 2 - Frontend React App
+#### Terminal 2 - Frontend Vite App
 ```bash
-# Start React development server
-cd frontend
-npm start
+# Start Vite development server
+npm --prefix apps/web run dev
 
 # App will open at http://localhost:3000
 ```
 
-Uploaded PDFs are staged in memory and ingested directly into the vector store. Local `uploads/`, `data/`, and `cache/` folders are not required for the normal document upload flow.
+Alternative (from repo root):
+
+```bash
+npm run dev:web
+python -m apps.backend.run_server
+```
+
+## Vercel Deployment (Monorepo)
+
+This repository is configured to deploy both frontend and backend on Vercel:
+
+- Frontend static build output: `apps/web/build`
+- Backend serverless entrypoint: `api/[...path].py`
+- Routing/build settings: `vercel.json`
+
+### Deploy Steps
+
+1. Import this repository into Vercel.
+2. Ensure project root is repository root.
+3. Confirm build settings:
+   - Build Command: `npm --prefix apps/web run build`
+   - Output Directory: `apps/web/build`
+4. Add required environment variables in Vercel Project Settings:
+   - `SUPABASE_DB_URL`
+   - `SUPABASE_TABLE`
+   - `GROQ_API_KEY`
+   - `GROQ_MODEL`
+   - `SERVERLESS_MODE=true`
+   - `INGEST_INLINE_ON_SERVERLESS=true`
+   - `SERVERLESS_STATE_ENABLED=true`
+   - `AUTH_TOKEN_SECRET` (required in production)
+   - Any additional values from `.env` needed for your environment.
+5. Deploy.
+
+API requests from the frontend should continue to use `/api/...` paths.
+
+Uploaded PDFs are staged in Postgres (via `SUPABASE_DB_URL`) so upload and ingest remain durable across stateless serverless invocations.
+
+Vercel free plan note:
+- Keep uploads reasonably small to avoid serverless execution limits during extraction/chunking.
+- For very large PDFs, use a dedicated worker (Render/Railway/VM) and keep Vercel for frontend + query API.
 
 ### 6. Verify Installation
 
@@ -221,7 +287,7 @@ Try these sample queries to test the system:
 
 ### Custom Embedding Models
 ```python
-# In backend/config/settings.py
+# In apps/backend/config/settings.py
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Default
 # Alternatives:
 # "sentence-transformers/all-mpnet-base-v2"  # Better accuracy, slower
@@ -266,13 +332,13 @@ RATE_LIMIT_WINDOW=3600
 ### Logs and Debugging
 ```bash
 # View API logs
-tail -f backend/logs/api.log
+tail -f apps/backend/logs/api.log
 
 # View scheduler logs  
-tail -f backend/logs/scheduler.log
+tail -f apps/backend/logs/scheduler.log
 
 # View update operations
-tail -f backend/logs/updater.log
+tail -f apps/backend/logs/updater.log
 ```
 
 ## 🛠️ Troubleshooting
@@ -314,7 +380,7 @@ pip install --no-deps <package-name>
 #### 4. Memory Issues
 ```bash
 # Reduce embedding model size
-# Edit backend/config/settings.py:
+# Edit apps/backend/config/settings.py:
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Smaller, faster
 
 # Reduce chunk processing
@@ -384,8 +450,8 @@ python -m pytest tests/
 npm test
 
 # Code formatting
-black backend/
-prettier --write frontend/src/
+black apps/backend/
+prettier --write apps/web/src/
 ```
 
 ### Code Style

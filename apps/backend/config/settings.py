@@ -9,6 +9,16 @@ from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator
 from typing import Optional, List
 
+SETTINGS_FILE = Path(__file__).resolve()
+BACKEND_ROOT = SETTINGS_FILE.parents[1]
+APPS_ROOT = BACKEND_ROOT.parent
+REPO_ROOT = APPS_ROOT.parent
+ENV_FILE_CANDIDATES = (
+    BACKEND_ROOT / ".env",
+    APPS_ROOT / ".env",
+    REPO_ROOT / ".env",
+)
+
 class Settings(BaseSettings):
     """Application settings with environment variable support"""
 
@@ -35,6 +45,8 @@ class Settings(BaseSettings):
     host: str = Field("0.0.0.0", env="HOST")
     port: int = Field(8000, env="PORT")
     reload: bool = Field(False, env="RELOAD")
+    serverless_mode: bool = Field(False, env="SERVERLESS_MODE")
+    ingest_inline_on_serverless: bool = Field(True, env="INGEST_INLINE_ON_SERVERLESS")
     
     # Database settings
     chroma_db_path: str = Field("./chroma_db", env="CHROMA_DB_PATH")
@@ -98,11 +110,18 @@ class Settings(BaseSettings):
     pipeline_debug_dir: str = Field("./debug_logs", env="PIPELINE_DEBUG_DIR")
     auto_ingest_enabled: bool = Field(False, env="AUTO_INGEST_ENABLED")
     persist_ingestion_log: bool = Field(False, env="PERSIST_INGESTION_LOG")
+
+    # Serverless state persistence
+    serverless_state_enabled: bool = Field(True, env="SERVERLESS_STATE_ENABLED")
+    staged_upload_ttl_minutes: int = Field(45, env="STAGED_UPLOAD_TTL_MINUTES")
+    ingestion_status_ttl_hours: int = Field(24, env="INGESTION_STATUS_TTL_HOURS")
     
     # Security settings
     api_key: Optional[str] = Field(None, env="API_KEY")
     rate_limit_requests: int = Field(100, env="RATE_LIMIT_REQUESTS")
     rate_limit_window: int = Field(3600, env="RATE_LIMIT_WINDOW")  # seconds
+    auth_token_secret: Optional[str] = Field(None, env="AUTH_TOKEN_SECRET")
+    auth_token_ttl_hours: int = Field(8, env="AUTH_TOKEN_TTL_HOURS")
 
     # Memory layer settings
     memory_enabled: bool = Field(True, env="MEMORY_ENABLED")
@@ -112,7 +131,7 @@ class Settings(BaseSettings):
     memory_long_top_k: int = Field(6, env="MEMORY_LONG_TOP_K")
     
     class Config:
-        env_file = (".env", "../.env")
+        env_file = tuple(str(path) for path in ENV_FILE_CANDIDATES)
         env_file_encoding = "utf-8"
         extra = "ignore"  # Allow extra fields in environment
     
@@ -121,6 +140,14 @@ class Settings(BaseSettings):
         path = Path(self.chroma_db_path)
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def is_serverless_runtime(self) -> bool:
+        """Detect serverless runtime (explicit flag or Vercel environment)."""
+        if self.serverless_mode:
+            return True
+
+        vercel_flag = str(os.getenv("VERCEL", "")).strip().lower()
+        return vercel_flag in {"1", "true", "yes", "on"}
 
 # Global settings instance
 settings = Settings()

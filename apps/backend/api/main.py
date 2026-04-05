@@ -3,7 +3,7 @@ FastAPI Main Application for NAAC Compliance Intelligence System
 Provides REST API endpoints for the complete RAG pipeline and auto-update system
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File, Form, APIRouter
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File, Form, APIRouter, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -27,6 +27,13 @@ except Exception as import_exc:  # pragma: no cover - optional dependency
     SupabaseVectorStore = None  # type: ignore[assignment]
     SUPABASE_IMPORT_ERROR = import_exc
 
+try:
+    from ..db.serverless_state_store import ServerlessStateStore  # type: ignore[attr-defined]
+    SERVERLESS_STATE_IMPORT_ERROR = None
+except Exception as import_exc:  # pragma: no cover - optional dependency
+    ServerlessStateStore = None  # type: ignore[assignment]
+    SERVERLESS_STATE_IMPORT_ERROR = import_exc
+
 from ..db.local_store import LocalVectorStore
 from ..llm.groq_client import GroqClient
 from ..memory.memory_store import ConversationMemoryStore, MemoryIdentity
@@ -34,7 +41,7 @@ from ..ingestion.ingest import DocumentIngestionPipeline
 from ..updater.auto_ingest import NAACAutoIngest
 from ..scheduler.update_scheduler import NAACUpdateScheduler
 from ..config.settings import get_settings
-from ..auth.auth import authenticate, validate_token, logout, get_session_info
+from ..auth.auth import authenticate, logout, get_session_info
 
 
 # Get application settings
@@ -55,13 +62,26 @@ metadata_mapper: Optional[NAACMetadataMapper] = None
 vector_store_instance: Optional[Any] = None
 memory_store_instance: Optional[ConversationMemoryStore] = None
 ingestion_pipeline_instance: Optional[DocumentIngestionPipeline] = None
+state_store_instance: Optional[Any] = None
 ingestion_status_store: Dict[str, Dict[str, Any]] = {}
 ingestion_status_lock = Lock()
 ACTIVE_INGEST_STATUSES = {"queued", "processing"}
 staged_upload_store: Dict[str, Dict[str, Any]] = {}
 staged_upload_lock = Lock()
 STAGED_UPLOAD_PREFIX = "memory://upload/"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_project_root() -> Path:
+    """Resolve repository root regardless of whether backend lives at root or under apps/."""
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / ".git").exists() or (parent / "README.md").exists() and (parent / "requirements.txt").exists():
+            return parent
+    # Fallback for common monorepo layout: <repo>/apps/backend/api/main.py
+    return current.parents[3]
+
+
+PROJECT_ROOT = _resolve_project_root()
 
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
@@ -129,6 +149,10 @@ class LoginResponse(BaseModel):
     message: str = Field(..., description="Login status message")
 
 
+class LogoutRequest(BaseModel):
+    token: Optional[str] = Field(None, description="Session token to invalidate")
+
+
 
 # Lifespan management
 @asynccontextmanager
@@ -171,7 +195,7 @@ app.add_middleware(
 
 async def initialize_system():
     """Initialize all system components"""
-    global rag_pipeline, auto_ingest, scheduler, metadata_mapper, vector_store_instance, memory_store_instance, ingestion_pipeline_instance
+    global rag_pipeline, auto_ingest, scheduler, metadata_mapper, vector_store_instance, memory_store_instance, ingestion_pipeline_instance, state_store_instance
     
     try:
         # Initialize configured vector store with local fallback
@@ -212,6 +236,26 @@ async def initialize_system():
                 embedding_batch_size=settings.embedding_batch_size,
             )
         vector_store_instance = vector_store
+
+        if settings.serverless_state_enabled and settings.supabase_db_url:
+            if ServerlessStateStore is None:
+                logger.warning(
+                    "Serverless state store requested but dependency import failed: %s",
+                    SERVERLESS_STATE_IMPORT_ERROR,
+                )
+                state_store_instance = None
+            else:
+                serverless_state_store = ServerlessStateStore(
+                    db_url=settings.supabase_db_url,
+                    staged_upload_ttl_minutes=settings.staged_upload_ttl_minutes,
+                    ingestion_status_ttl_hours=settings.ingestion_status_ttl_hours,
+                )
+                serverless_state_store.initialize_schema()
+                serverless_state_store.cleanup_expired()
+                state_store_instance = serverless_state_store
+                logger.info("Serverless state persistence enabled")
+        else:
+            state_store_instance = None
 
         if settings.memory_enabled and settings.supabase_db_url:
             memory_store = ConversationMemoryStore(
@@ -272,13 +316,20 @@ async def initialize_system():
             },
         )
         
-        if settings.auto_ingest_enabled:
+        if settings.auto_ingest_enabled and not settings.is_serverless_runtime():
             auto_ingest = NAACAutoIngest(
                 chroma_store=vector_store,
                 ingestion_pipeline=ingestion_pipeline,
             )
             scheduler = NAACUpdateScheduler(auto_ingest=auto_ingest)
             scheduler.start()
+        elif settings.auto_ingest_enabled and settings.is_serverless_runtime():
+            auto_ingest = None
+            scheduler = None
+            logger.warning(
+                "AUTO_INGEST_ENABLED is true, but scheduler is disabled in serverless runtime. "
+                "Use an external cron trigger instead of in-process scheduler."
+            )
         else:
             auto_ingest = None
             scheduler = None
@@ -345,6 +396,15 @@ def get_ingestion_pipeline() -> DocumentIngestionPipeline:
     return ingestion_pipeline_instance
 
 
+def _is_serverless_runtime() -> bool:
+    """Return True when running in Vercel/serverless mode."""
+    try:
+        return settings.is_serverless_runtime()
+    except Exception:
+        vercel_flag = str(os.getenv("VERCEL", "")).strip().lower()
+        return vercel_flag in {"1", "true", "yes", "on"}
+
+
 def _build_memory_identity(request: QueryRequest) -> MemoryIdentity:
     return MemoryIdentity(
         tenant_id=(request.tenant_id or "default_tenant").strip() or "default_tenant",
@@ -380,10 +440,31 @@ def _set_staged_upload(
     filename: str,
     document_type: str,
 ) -> Dict[str, Any]:
+    safe_filename = Path(filename or "uploaded.pdf").name
+
+    if state_store_instance is not None:
+        try:
+            persisted = state_store_instance.set_staged_upload(
+                token,
+                content=content,
+                filename=safe_filename,
+                document_type=document_type,
+            )
+            return {
+                **persisted,
+                "content": content,
+            }
+        except Exception as store_error:
+            logger.warning(
+                "Persistent staged upload write failed for %s, falling back to in-memory store: %s",
+                safe_filename,
+                store_error,
+            )
+
     record = {
         "token": token,
         "content": content,
-        "filename": Path(filename or "uploaded.pdf").name,
+        "filename": safe_filename,
         "document_type": document_type,
         "file_size": len(content or b""),
         "created_at": datetime.now().isoformat(),
@@ -394,12 +475,38 @@ def _set_staged_upload(
 
 
 def _get_staged_upload(token: str) -> Optional[Dict[str, Any]]:
+    if state_store_instance is not None:
+        try:
+            record = state_store_instance.get_staged_upload(token)
+            if record is not None:
+                return record
+        except Exception as store_error:
+            logger.warning(
+                "Persistent staged upload read failed for %s, falling back to in-memory store: %s",
+                token,
+                store_error,
+            )
+
     with staged_upload_lock:
         record = staged_upload_store.get(token)
         return record.copy() if record else None
 
 
 def _remove_staged_upload(token: str) -> Optional[Dict[str, Any]]:
+    if state_store_instance is not None:
+        try:
+            removed = state_store_instance.remove_staged_upload(token)
+            if removed is not None:
+                with staged_upload_lock:
+                    staged_upload_store.pop(token, None)
+                return removed
+        except Exception as store_error:
+            logger.warning(
+                "Persistent staged upload delete failed for %s, falling back to in-memory store: %s",
+                token,
+                store_error,
+            )
+
     with staged_upload_lock:
         record = staged_upload_store.pop(token, None)
         return record.copy() if record else None
@@ -428,51 +535,105 @@ def _set_ingestion_status(
     normalized_path = _normalize_ingestion_path(file_path)
     now = datetime.now().isoformat()
 
+    current: Dict[str, Any] = {}
+    if state_store_instance is not None:
+        try:
+            current = state_store_instance.get_ingestion_statuses([normalized_path]).get(normalized_path, {})
+        except Exception as store_error:
+            logger.warning(
+                "Persistent ingestion status read failed for %s, falling back to in-memory store: %s",
+                normalized_path,
+                store_error,
+            )
+
+    if not current:
+        with ingestion_status_lock:
+            current = ingestion_status_store.get(normalized_path, {}).copy()
+
+    updated = {
+        **current,
+        **extra,
+        "file_path": normalized_path,
+        "status": status,
+        "updated_at": now,
+    }
+    if phase is not None:
+        updated["phase"] = phase
+    if message is not None:
+        updated["message"] = message
+    if status in ACTIVE_INGEST_STATUSES and not updated.get("started_at"):
+        updated["started_at"] = now
+    if status in {"completed", "failed"}:
+        updated["completed_at"] = now
+
+    if state_store_instance is not None:
+        try:
+            persisted = state_store_instance.set_ingestion_status(normalized_path, updated)
+            with ingestion_status_lock:
+                ingestion_status_store[normalized_path] = persisted.copy()
+            return persisted.copy()
+        except Exception as store_error:
+            logger.warning(
+                "Persistent ingestion status write failed for %s, falling back to in-memory store: %s",
+                normalized_path,
+                store_error,
+            )
+
     with ingestion_status_lock:
-        current = ingestion_status_store.get(normalized_path, {}).copy()
-        updated = {
-            **current,
-            **extra,
-            "file_path": normalized_path,
-            "status": status,
-            "updated_at": now,
-        }
-        if phase is not None:
-            updated["phase"] = phase
-        if message is not None:
-            updated["message"] = message
-        if status in ACTIVE_INGEST_STATUSES and not updated.get("started_at"):
-            updated["started_at"] = now
-        if status in {"completed", "failed"}:
-            updated["completed_at"] = now
         ingestion_status_store[normalized_path] = updated
         return updated.copy()
 
 
 def _remove_ingestion_status(file_path: str) -> None:
     normalized_path = _normalize_ingestion_path(file_path)
+
+    if state_store_instance is not None:
+        try:
+            state_store_instance.remove_ingestion_status(normalized_path)
+        except Exception as store_error:
+            logger.warning("Persistent ingestion status delete failed for %s: %s", normalized_path, store_error)
+
     with ingestion_status_lock:
         ingestion_status_store.pop(normalized_path, None)
 
 
 def _get_ingestion_statuses(file_paths: List[str]) -> Dict[str, Dict[str, Any]]:
     normalized_paths = [_normalize_ingestion_path(path) for path in file_paths]
+
+    persisted_rows: Dict[str, Dict[str, Any]] = {}
+    if state_store_instance is not None:
+        try:
+            persisted_rows = state_store_instance.get_ingestion_statuses(normalized_paths)
+        except Exception as store_error:
+            logger.warning("Persistent ingestion status batch read failed: %s", store_error)
+
     with ingestion_status_lock:
-        return {
-            path: ingestion_status_store.get(
-                path,
-                {
-                    "file_path": path,
-                    "status": "unknown",
-                    "phase": "unknown",
-                    "message": "No ingestion status available yet.",
-                },
-            ).copy()
+        memory_rows = {
+            path: ingestion_status_store.get(path, {}).copy()
             for path in normalized_paths
         }
 
+    result: Dict[str, Dict[str, Any]] = {}
+    for path in normalized_paths:
+        status_row = persisted_rows.get(path) or memory_rows.get(path) or {
+            "file_path": path,
+            "status": "unknown",
+            "phase": "unknown",
+            "message": "No ingestion status available yet.",
+        }
+        result[path] = status_row
+
+    return result
+
 
 def _has_active_manual_ingestion() -> bool:
+    if state_store_instance is not None:
+        try:
+            if state_store_instance.has_active_ingestion(list(ACTIVE_INGEST_STATUSES)):
+                return True
+        except Exception as store_error:
+            logger.warning("Persistent active-ingestion check failed, falling back to in-memory: %s", store_error)
+
     with ingestion_status_lock:
         return any(
             status_row.get("status") in ACTIVE_INGEST_STATUSES
@@ -480,21 +641,6 @@ def _has_active_manual_ingestion() -> bool:
         )
 
 # API Endpoints
-
-@api_router.post("/auth/login", response_model=LoginResponse)
-async def login_endpoint(request: LoginRequest):
-    """Authenticate and return a session token"""
-    token = authenticate(request.username, request.password)
-    if not token:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    
-    session = get_session_info(token)
-    return LoginResponse(
-        token=token,
-        username=request.username,
-        expires_at=session["expires_at"] if session else "",
-        message="Login successful"
-    )
 
 @api_router.get("/health")
 async def health_check():
@@ -509,6 +655,7 @@ async def health_check():
                 "scheduler": scheduler is not None and scheduler.scheduler.running if scheduler else False,
                 "metadata_mapper": metadata_mapper is not None,
                 "memory_layer": memory_store_instance is not None,
+                "serverless_state": state_store_instance is not None,
             }
         }
         
@@ -636,10 +783,10 @@ async def ingest_documents(
     Process PDF documents and add them to the vector store
     """
     try:
-        def run_ingestion():
-            """Background task for document ingestion"""
+        def run_ingestion() -> List[Dict[str, Any]]:
+            """Shared ingestion worker used by both background and inline execution."""
+            results: List[Dict[str, Any]] = []
             try:
-                results = []
                 for raw_path in request.file_paths:
                     file_path = _normalize_ingestion_path(raw_path)
 
@@ -653,11 +800,13 @@ async def ingest_documents(
                                 phase="missing_upload",
                                 message="The staged upload is no longer available. Please upload the PDF again.",
                             )
-                            results.append({
-                                "file": file_path,
-                                "status": "failed",
-                                "error": "Staged upload not found",
-                            })
+                            results.append(
+                                {
+                                    "file": file_path,
+                                    "status": "failed",
+                                    "error": "Staged upload not found",
+                                }
+                            )
                             continue
                         file_name = str(staged_upload.get("filename") or "uploaded.pdf")
                     else:
@@ -670,11 +819,13 @@ async def ingest_documents(
                                 phase="missing_file",
                                 message=f"File not found: {file_path}",
                             )
-                            results.append({
-                                "file": file_path,
-                                "status": "failed",
-                                "error": f"File not found: {file_path}"
-                            })
+                            results.append(
+                                {
+                                    "file": file_path,
+                                    "status": "failed",
+                                    "error": f"File not found: {file_path}",
+                                }
+                            )
                             continue
                         file_name = resolved.name
 
@@ -749,11 +900,12 @@ async def ingest_documents(
                             debug_trace_id=result.get("debug_trace_id"),
                         )
                     results.append(result)
-                
+
                 logger.info(f"Ingestion completed: {len(results)} documents processed")
-                
-            except Exception as e:
-                logger.error(f"Background ingestion failed: {e}")
+                return results
+            except Exception as worker_error:
+                logger.error(f"Ingestion worker failed: {worker_error}", exc_info=True)
+                return results
         
         resolved_paths = []
         for raw_path in request.file_paths:
@@ -767,15 +919,32 @@ async def ingest_documents(
                 document_type=request.document_type,
             )
 
-        # Start background ingestion
+        if _is_serverless_runtime() and settings.ingest_inline_on_serverless:
+            logger.info("Serverless runtime detected: running ingestion inline for reliability")
+            results = await asyncio.to_thread(run_ingestion)
+            failure_count = len([row for row in results if row.get("status") != "success"])
+            return {
+                "status": "completed" if failure_count == 0 else "completed_with_errors",
+                "message": (
+                    f"Ingestion completed for {len(results)} documents"
+                    if failure_count == 0
+                    else f"Ingestion finished with {failure_count} failure(s)"
+                ),
+                "document_type": request.document_type,
+                "file_paths": resolved_paths,
+                "results": results,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        # Local/dev mode keeps background ingestion to preserve current responsiveness.
         background_tasks.add_task(run_ingestion)
-        
+
         return {
             "status": "accepted",
             "message": f"Ingestion started for {len(request.file_paths)} documents",
             "document_type": request.document_type,
             "file_paths": resolved_paths,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
         
     except Exception as e:
@@ -1202,6 +1371,8 @@ async def login(request: LoginRequest):
     if token is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
     info = get_session_info(token)
+    if info is None:
+        raise HTTPException(status_code=500, detail="Failed to create authenticated session")
     return LoginResponse(
         token=token,
         username=info["username"],
@@ -1210,18 +1381,33 @@ async def login(request: LoginRequest):
     )
 
 @api_router.post("/auth/logout")
-async def logout_endpoint(token: str = None):
+async def logout_endpoint(
+    request: Optional[LogoutRequest] = None,
+    token: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+):
     """Invalidate a session token."""
-    if token:
-        logout(token)
+    token_value = (token or "").strip()
+    if request and request.token:
+        token_value = str(request.token).strip()
+
+    if not token_value and authorization and authorization.lower().startswith("bearer "):
+        token_value = authorization.split(" ", 1)[1].strip()
+
+    if token_value:
+        logout(token_value)
     return {"status": "ok", "message": "Logged out"}
 
 @api_router.get("/auth/me")
-async def me(token: str = None):
+async def me(token: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
     """Return session info for a valid token (used by frontend to rehydrate auth state)."""
-    if not token:
+    token_value = (token or "").strip()
+    if not token_value and authorization and authorization.lower().startswith("bearer "):
+        token_value = authorization.split(" ", 1)[1].strip()
+
+    if not token_value:
         raise HTTPException(status_code=401, detail="No token provided")
-    info = get_session_info(token)
+    info = get_session_info(token_value)
     if info is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return info

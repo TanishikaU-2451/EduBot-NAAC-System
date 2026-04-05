@@ -18,11 +18,14 @@ class ApiService {
   private api: AxiosInstance
 
   constructor() {
-    const configuredBase = process.env.REACT_APP_API_BASE_URL
+    const configuredBaseRaw =
+      (import.meta.env.VITE_API_BASE_URL as string | undefined) ||
+      ((import.meta as any).env?.REACT_APP_API_BASE_URL as string | undefined)
+    const configuredBase = configuredBaseRaw?.trim()
     let normalizedBase = '/api'
 
-    if (configuredBase && configuredBase.trim()) {
-      const trimmed = configuredBase.trim().replace(/\/+$/, '')
+    if (configuredBase) {
+      const trimmed = configuredBase.replace(/\/+$/, '')
       // If user provides full backend host without /api, force API prefix.
       normalizedBase = trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`
     }
@@ -38,6 +41,18 @@ class ApiService {
     // Add request interceptor for logging
     this.api.interceptors.request.use(
       (config) => {
+        const token = sessionStorage.getItem('auth_token')
+        if (token) {
+          const headers = config.headers as any
+          if (headers && typeof headers.set === 'function') {
+            headers.set('Authorization', `Bearer ${token}`)
+          } else {
+            config.headers = {
+              ...(config.headers || {}),
+              Authorization: `Bearer ${token}`,
+            } as any
+          }
+        }
         console.log(`[API] Making request: ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`)
         console.log(`[API] Full URL: ${config.baseURL}${config.url}`)
         return config

@@ -408,14 +408,30 @@ const App = ({ username = 'User', onLogout }: { username?: string; onLogout?: ()
             file_paths: [document.storedPath!],
           })
 
+          const inlineResult = Array.isArray(response?.results) ? response.results[0] : null
+          const inlineCompleted = response?.status === 'completed' || response?.status === 'completed_with_errors'
+          const inlineSucceeded = inlineResult?.status === 'success'
+          const nextStatus: UploadState = inlineCompleted
+            ? (inlineSucceeded ? 'completed' : 'error')
+            : 'queued'
+          const nextMessage = inlineCompleted
+            ? (inlineSucceeded
+                ? `Processed into ${inlineResult?.chunks_written ?? 0} chunks and stored successfully.`
+                : String(inlineResult?.error || `${documentLabels[documentType]} processing failed.`))
+            : `${documentLabels[documentType]} processing started in the background.`
+
           setDocuments((prev) => ({
             ...prev,
             [documentType]: prev[documentType]
               ? {
                   ...prev[documentType]!,
-                  status: 'queued',
+                  status: nextStatus,
                   ingestRequestedAt: response.timestamp || new Date().toISOString(),
-                  statusMessage: `${documentLabels[documentType]} processing started in the background.`,
+                  statusMessage: nextMessage,
+                  chunksGenerated:
+                    inlineResult?.chunks_generated ?? prev[documentType]!.chunksGenerated,
+                  chunksWritten:
+                    inlineResult?.chunks_written ?? prev[documentType]!.chunksWritten,
                 }
               : prev[documentType],
           }))
